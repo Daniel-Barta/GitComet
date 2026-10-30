@@ -58,7 +58,7 @@ fn commit_details_metadata_fixture(
         assert_eq!(pane.commit_details_sha_input.read(app).text(), commit_sha);
         assert_eq!(pane.commit_details_date_input.read(app).text(), commit_date);
         assert_eq!(
-            pane.commit_details_parent_input.read(app).text(),
+            pane.commit_details_parent_fields[0].input.read(app).text(),
             parent_sha
         );
     });
@@ -83,7 +83,7 @@ fn commit_details_metadata_fields_are_selectable(cx: &mut gpui::TestAppContext) 
                 let input = match label {
                     "sha" => pane.commit_details_sha_input.clone(),
                     "date" => pane.commit_details_date_input.clone(),
-                    _ => pane.commit_details_parent_input.clone(),
+                    _ => pane.commit_details_parent_fields[0].input.clone(),
                 };
                 input.update(cx, |input, cx| input.select_all_text(window, cx));
             });
@@ -95,7 +95,10 @@ fn commit_details_metadata_fields_are_selectable(cx: &mut gpui::TestAppContext) 
             let actual = match label {
                 "sha" => pane.commit_details_sha_input.read(app).selected_text(),
                 "date" => pane.commit_details_date_input.read(app).selected_text(),
-                _ => pane.commit_details_parent_input.read(app).selected_text(),
+                _ => pane.commit_details_parent_fields[0]
+                    .input
+                    .read(app)
+                    .selected_text(),
             };
             assert_eq!(actual, Some(expected), "{label} field must be selectable");
         });
@@ -1299,6 +1302,243 @@ fn commit_details_parent_sha_dash_has_no_link_menu(cx: &mut gpui::TestAppContext
     assert!(
         popover.is_none(),
         "expected placeholder parent value to stay non-interactive, got {popover:?}"
+    );
+}
+
+const MERGE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+const FIRST_PARENT_SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
+const SECOND_PARENT_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+/// Shows `current_sha` in the details pane with `parents`, every one of them on
+/// the history page so a parent's Reveal has a row to select.
+fn show_commit_with_parents(
+    view: &gpui::Entity<crate::view::GitCometView>,
+    cx: &mut gpui::VisualTestContext,
+    repo_id: gitcomet_state::model::RepoId,
+    current_sha: &str,
+    parents: &[&str],
+) {
+    let commit = |sha: &str, summary: &str| gitcomet_core::domain::Commit {
+        id: gitcomet_core::domain::CommitId(sha.into()),
+        parent_ids: gitcomet_core::domain::CommitParentIds::new(),
+        summary: summary.into(),
+        author: "Alice".into(),
+        time: std::time::SystemTime::UNIX_EPOCH,
+    };
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let log_rev = this
+                .state
+                .repos
+                .iter()
+                .find(|repo| repo.id == repo_id)
+                .map_or(0, |repo| repo.log_rev)
+                + 1;
+            let mut repo = opening_repo_state(repo_id, Path::new("/tmp/repo-merge-parents"));
+            repo.open = Loadable::Ready(());
+            repo.head_branch = Loadable::Ready("main".into());
+            repo.status = Loadable::Ready(gitcomet_core::domain::RepoStatus::default().into());
+            repo.log = Loadable::Ready(Arc::new(gitcomet_core::domain::LogPage {
+                commits: std::iter::once(commit(current_sha, "current"))
+                    .chain(parents.iter().map(|sha| commit(sha, "parent")))
+                    .collect(),
+                next_cursor: None,
+            }));
+            repo.log_rev = log_rev;
+            repo.history_state.selected_commit =
+                Some(gitcomet_core::domain::CommitId(current_sha.into()));
+            repo.history_state.commit_details =
+                Loadable::Ready(Arc::new(gitcomet_core::domain::CommitDetails {
+                    id: gitcomet_core::domain::CommitId(current_sha.into()),
+                    message: "subject".into(),
+                    author_name: String::new(),
+                    author_email: String::new(),
+                    authored_at_unix: 0,
+                    committed_at: "2026-03-08 12:34:56 +0200".into(),
+                    committed_at_unix: 0,
+                    parent_ids: parents
+                        .iter()
+                        .map(|sha| gitcomet_core::domain::CommitId((*sha).into()))
+                        .collect(),
+                    files: vec![],
+                }));
+
+            let next_state = app_state_with_repo(repo, repo_id);
+            this.store
+                .replace_snapshot_for_test(Arc::clone(&next_state));
+            push_test_state(this, next_state, cx);
+        });
+    });
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+}
+
+fn shown_parent_texts(
+    view: &gpui::Entity<crate::view::GitCometView>,
+    cx: &mut gpui::VisualTestContext,
+    count: usize,
+) -> Vec<String> {
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        pane.commit_details_parent_fields[..count]
+            .iter()
+            .map(|field| field.input.read(app).text().to_string())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn commit_details_merge_shows_every_parent_in_order(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new_test(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::super::GitCometView::new(store, events, None, window, cx)
+    });
+    let repo_id = gitcomet_state::model::RepoId(41);
+    show_commit_with_parents(
+        &view,
+        cx,
+        repo_id,
+        MERGE_SHA,
+        &[FIRST_PARENT_SHA, SECOND_PARENT_SHA],
+    );
+
+    assert_eq!(
+        shown_parent_texts(&view, cx, 2),
+        [FIRST_PARENT_SHA, SECOND_PARENT_SHA]
+    );
+    let first = cx
+        .debug_bounds("commit_details_parent_link_menu")
+        .expect("expected first parent field");
+    let second = cx
+        .debug_bounds("commit_details_parent_link_menu_2")
+        .expect("expected second parent field");
+    assert!(
+        second.top() >= first.bottom(),
+        "the second parent should sit under the first: {first:?} vs {second:?}"
+    );
+
+    // The second parent is as selectable as the first.
+    cx.update(|window, app| {
+        let input = view
+            .read(app)
+            .details_pane
+            .read(app)
+            .commit_details_parent_fields[1]
+            .input
+            .clone();
+        input.update(app, |input, cx| input.select_all_text(window, cx));
+    });
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let selected = details_pane.read(app).commit_details_parent_fields[1]
+            .input
+            .read(app)
+            .selected_text();
+        assert_eq!(selected.as_deref(), Some(SECOND_PARENT_SHA));
+    });
+}
+
+#[gpui::test]
+fn commit_details_second_parent_click_menu_navigate_reveals_it(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new_test(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::super::GitCometView::new(store, events, None, window, cx)
+    });
+    let repo_id = gitcomet_state::model::RepoId(42);
+    show_commit_with_parents(
+        &view,
+        cx,
+        repo_id,
+        MERGE_SHA,
+        &[FIRST_PARENT_SHA, SECOND_PARENT_SHA],
+    );
+
+    let second = cx
+        .debug_bounds("commit_details_parent_link_menu_2")
+        .expect("expected second parent sha link target");
+    let popover = click_commit_details_link(
+        cx,
+        &view,
+        point(second.left() + px(4.0), second.center().y),
+        1,
+    );
+    assert!(
+        matches!(
+            popover,
+            Some(PopoverKind::CommitShaLinkMenu {
+                ref commit_id,
+                allow_navigate: true,
+                ..
+            }) if commit_id.as_ref() == SECOND_PARENT_SHA
+        ),
+        "clicking the second parent id should open its menu, got {popover:?}"
+    );
+
+    let reveal_bounds = cx
+        .debug_bounds("context_menu_reveal_commit")
+        .expect("expected second parent reveal commit entry");
+    simulate_counted_click(cx, reveal_bounds.center(), 1);
+    cx.run_until_parked();
+    wait_for_store_selected_commit(cx, &view, repo_id, SECOND_PARENT_SHA);
+}
+
+/// Fields a merge grew are kept, but a later single-parent commit must not
+/// draw the merge's leftover second parent.
+#[gpui::test]
+fn commit_details_single_parent_after_merge_draws_one_parent(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new_test(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::super::GitCometView::new(store, events, None, window, cx)
+    });
+    let repo_id = gitcomet_state::model::RepoId(43);
+    show_commit_with_parents(
+        &view,
+        cx,
+        repo_id,
+        MERGE_SHA,
+        &[FIRST_PARENT_SHA, SECOND_PARENT_SHA],
+    );
+    assert!(
+        cx.debug_bounds("commit_details_parent_link_menu_2")
+            .is_some()
+    );
+
+    show_commit_with_parents(&view, cx, repo_id, FIRST_PARENT_SHA, &[SECOND_PARENT_SHA]);
+
+    assert_eq!(shown_parent_texts(&view, cx, 1), [SECOND_PARENT_SHA]);
+    assert!(cx.debug_bounds("commit_details_parent_link_menu").is_some());
+    assert!(
+        cx.debug_bounds("commit_details_parent_link_menu_2")
+            .is_none(),
+        "a single-parent commit should draw one parent field"
+    );
+}
+
+#[gpui::test]
+fn commit_details_octopus_merge_shows_every_parent(cx: &mut gpui::TestAppContext) {
+    const THIRD_PARENT_SHA: &str = "00112233445566778899aabbccddeeff00112233";
+    let (store, events) = AppStore::new_test(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::super::GitCometView::new(store, events, None, window, cx)
+    });
+    let repo_id = gitcomet_state::model::RepoId(44);
+    show_commit_with_parents(
+        &view,
+        cx,
+        repo_id,
+        MERGE_SHA,
+        &[FIRST_PARENT_SHA, SECOND_PARENT_SHA, THIRD_PARENT_SHA],
+    );
+
+    assert_eq!(
+        shown_parent_texts(&view, cx, 3),
+        [FIRST_PARENT_SHA, SECOND_PARENT_SHA, THIRD_PARENT_SHA]
+    );
+    assert!(
+        cx.debug_bounds("commit_details_parent_link_menu_3")
+            .is_some()
     );
 }
 

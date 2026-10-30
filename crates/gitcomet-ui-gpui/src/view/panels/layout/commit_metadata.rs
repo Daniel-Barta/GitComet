@@ -339,28 +339,39 @@ impl DetailsPaneView {
             });
     }
 
-    pub(super) fn sync_commit_details_parent_input(
+    /// One field per parent, in git's order. A root commit shows "—" in the
+    /// first, which links nowhere.
+    pub(super) fn sync_commit_details_parent_fields(
         &mut self,
-        parent: &str,
+        parents: &[CommitId],
         repo_id: RepoId,
         interactive: bool,
         theme: AppTheme,
         cx: &mut gpui::Context<Self>,
     ) {
-        Self::sync_commit_details_input_value(&self.commit_details_parent_input, parent, cx);
-        self.commit_details_parent_input.update(cx, |input, cx| {
-            input.set_highlights(commit_sha_field_highlights(parent, theme), cx);
-        });
-        let parent_links = commit_sha_field_links(parent, interactive, true);
-        self.commit_details_parent_link_menu.update(cx, |menu, cx| {
-            menu.sync(
-                self.commit_details_parent_input.clone(),
-                repo_id,
-                parent_links,
-                "commit_details_parent_link_menu",
-                cx,
-            );
-        });
+        let count = parents.len().max(1);
+        self.ensure_commit_details_parent_fields(count, cx);
+        for (ix, field) in self.commit_details_parent_fields[..count]
+            .iter()
+            .enumerate()
+        {
+            let parent = parents.get(ix);
+            let text = parent.map_or("—", |parent| parent.as_ref());
+            Self::sync_commit_details_input_value(&field.input, text, cx);
+            field.input.update(cx, |input, cx| {
+                input.set_highlights(commit_sha_field_highlights(text, theme), cx);
+            });
+            let links = commit_sha_field_links(text, interactive && parent.is_some(), true);
+            field.link_menu.update(cx, |menu, cx| {
+                menu.sync(
+                    field.input.clone(),
+                    repo_id,
+                    links,
+                    field.link_id.clone(),
+                    cx,
+                );
+            });
+        }
     }
 
     /// The SHA field's text and link style, washed whole when the history find
