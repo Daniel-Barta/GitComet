@@ -790,9 +790,14 @@ fn hash_popover_kind<H: Hasher>(kind: &PopoverKind, hasher: &mut H) {
                 std::mem::discriminant(&entry.action).hash(hasher);
             }
         }
-        PopoverKind::MergeCommitConfirm { repo_id, commit_id } => {
+        PopoverKind::MergeCommitConfirm {
+            repo_id,
+            commit_id,
+            fast_forward,
+        } => {
             repo_id.hash(hasher);
             commit_id.hash(hasher);
+            fast_forward.hash(hasher);
         }
         PopoverKind::BranchExistsPrompt {
             repo_id,

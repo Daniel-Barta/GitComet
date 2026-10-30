@@ -798,6 +798,7 @@ fn review_adjusted_merge_refusal_explains_merge_risk() {
             Msg::MergeRef {
                 repo_id,
                 reference: "feature".into(),
+                fast_forward: MergeFastForward::Allow,
             }
         };
         assert!(reduce(&mut repos, &id_alloc, &mut state, message).is_empty());
@@ -987,6 +988,7 @@ fn every_pull_and_push_path_on_an_adjusted_branch_avoids_plain_git() {
         Msg::MergeRef {
             repo_id,
             reference: "feature".into(),
+            fast_forward: MergeFastForward::Allow,
         },
         Msg::SquashRef {
             repo_id,

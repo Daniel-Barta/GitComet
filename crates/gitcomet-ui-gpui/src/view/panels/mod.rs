@@ -492,6 +492,7 @@ pub(in crate::view) enum ContextMenuAction {
     MergeRef {
         repo_id: RepoId,
         reference: String,
+        fast_forward: MergeFastForward,
     },
     SquashRef {
         repo_id: RepoId,

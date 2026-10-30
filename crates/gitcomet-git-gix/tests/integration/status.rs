@@ -4,7 +4,9 @@ use gitcomet_core::domain::{
     FileDiffText, FileDiffTextSource, FileStatusKind,
 };
 use gitcomet_core::error::{Error, ErrorKind, GitFailureId};
-use gitcomet_core::services::{CancellationToken, CheckoutRemoteBranchMode, GitBackend};
+use gitcomet_core::services::{
+    CancellationToken, CheckoutRemoteBranchMode, GitBackend, MergeFastForward,
+};
 use gitcomet_core::services::{ConflictSide, InteractiveRebaseAction, InteractiveRebaseEntry};
 use gitcomet_core::test_support::git_fixture::{
     FixtureTimer, LinearCommit, append_config, import_linear_history, init_repository,

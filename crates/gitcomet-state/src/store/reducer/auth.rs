@@ -312,7 +312,14 @@ fn retry_msg_for_repo_command(repo_id: RepoId, command: RepoCommandKind) -> Opti
             remote,
             branch,
         },
-        RepoCommandKind::MergeRef { reference } => Msg::MergeRef { repo_id, reference },
+        RepoCommandKind::MergeRef {
+            reference,
+            fast_forward,
+        } => Msg::MergeRef {
+            repo_id,
+            reference,
+            fast_forward,
+        },
         RepoCommandKind::SquashRef { reference } => Msg::SquashRef { repo_id, reference },
         RepoCommandKind::Push => Msg::Push { repo_id },
         RepoCommandKind::PushWithTags { request } => Msg::PushWithTags { repo_id, request },

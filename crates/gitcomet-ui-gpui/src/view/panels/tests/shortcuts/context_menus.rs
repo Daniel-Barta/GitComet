@@ -860,7 +860,10 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
             },
         )
     });
-    assert_declared_shortcuts(&commit_model, &["C", "T", "D", "P", "R", "B", "I", "M"]);
+    assert_declared_shortcuts(
+        &commit_model,
+        &["C", "T", "D", "P", "R", "B", "I", "M", "N"],
+    );
     assert_shortcut_action!(
         commit_model,
         "Enter",
@@ -924,7 +927,19 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
         ContextMenuAction::OpenPopover {
             kind: PopoverKind::MergeCommitConfirm {
                 repo_id: rid,
-                commit_id: cid
+                commit_id: cid,
+                fast_forward: MergeFastForward::Allow,
+            }
+        } if *rid == repo_id && cid == &commit_id
+    );
+    assert_shortcut_action!(
+        commit_model,
+        "N",
+        ContextMenuAction::OpenPopover {
+            kind: PopoverKind::MergeCommitConfirm {
+                repo_id: rid,
+                commit_id: cid,
+                fast_forward: MergeFastForward::Never,
             }
         } if *rid == repo_id && cid == &commit_id
     );

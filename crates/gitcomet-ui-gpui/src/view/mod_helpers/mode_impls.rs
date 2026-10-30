@@ -236,6 +236,7 @@ pub(crate) enum PopoverKind {
     MergeCommitConfirm {
         repo_id: RepoId,
         commit_id: CommitId,
+        fast_forward: MergeFastForward,
     },
     MergeAbortConfirm {
         repo_id: RepoId,

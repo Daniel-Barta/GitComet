@@ -1662,7 +1662,11 @@ pub trait GitRepository: Send + Sync {
         )))
     }
 
-    fn merge_ref_with_output(&self, _reference: &str) -> Result<CommandOutput> {
+    fn merge_ref_with_output(
+        &self,
+        _reference: &str,
+        _fast_forward: MergeFastForward,
+    ) -> Result<CommandOutput> {
         Err(Error::new(ErrorKind::Unsupported(
             "merging a specific ref is not implemented for this backend",
         )))
@@ -2005,6 +2009,16 @@ pub enum PullMode {
     FastForwardIfPossible,
     FastForwardOnly,
     Rebase,
+}
+
+/// Whether merging a ref may fast-forward the current branch.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum MergeFastForward {
+    /// `git merge --ff`: fast-forward when possible, otherwise create a merge commit.
+    #[default]
+    Allow,
+    /// `git merge --no-ff`: always create a merge commit.
+    Never,
 }
 
 /// Filesystem kind supplied to a worktree ignore matcher.

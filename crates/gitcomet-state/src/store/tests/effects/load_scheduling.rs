@@ -2703,6 +2703,7 @@ fn schedule_effect_dispatches_many_variants_with_repo_present() {
             Effect::RepoCommand(RepoCommandEffect::MergeRef {
                 repo_id,
                 reference: "origin/main".to_string(),
+                fast_forward: MergeFastForward::Allow,
             }),
             1,
         ),

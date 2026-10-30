@@ -4,8 +4,9 @@ use gitcomet_core::auth::StagedGitAuth;
 use gitcomet_core::domain::*;
 use gitcomet_core::remote_url::RemoteUrlPolicy;
 use gitcomet_core::services::{
-    ConflictSide, ForcePushLease, InteractiveRebaseEntry, PullMode, RemoteUrlKind, ResetMode,
-    SafePushAfterCommitContext, SafePushAfterCommitTarget, SubmoduleTrustTarget,
+    ConflictSide, ForcePushLease, InteractiveRebaseEntry, MergeFastForward, PullMode,
+    RemoteUrlKind, ResetMode, SafePushAfterCommitContext, SafePushAfterCommitTarget,
+    SubmoduleTrustTarget,
 };
 use std::path::PathBuf;
 
@@ -196,6 +197,7 @@ pub enum RepoCommandEffect {
     MergeRef {
         repo_id: RepoId,
         reference: String,
+        fast_forward: MergeFastForward,
     },
     SquashRef {
         repo_id: RepoId,
@@ -667,9 +669,17 @@ impl RepoCommandEffect {
                 branch,
                 ..
             } => Some(RepoCommandKind::PullBranch { remote, branch }.finished(repo_id, Err(error))),
-            RepoCommandEffect::MergeRef { repo_id, reference } => {
-                Some(RepoCommandKind::MergeRef { reference }.finished(repo_id, Err(error)))
-            }
+            RepoCommandEffect::MergeRef {
+                repo_id,
+                reference,
+                fast_forward,
+            } => Some(
+                RepoCommandKind::MergeRef {
+                    reference,
+                    fast_forward,
+                }
+                .finished(repo_id, Err(error)),
+            ),
             RepoCommandEffect::SquashRef { repo_id, reference } => {
                 Some(RepoCommandKind::SquashRef { reference }.finished(repo_id, Err(error)))
             }

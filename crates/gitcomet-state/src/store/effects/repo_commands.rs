@@ -8,8 +8,8 @@ use gitcomet_core::error::{Error, ErrorKind};
 use gitcomet_core::remote_url::RemoteUrlPolicy;
 use gitcomet_core::services::{
     CommandOutput, ConflictSide, ForcePushLease, GitBackend, GitRepository, InteractiveRebaseEntry,
-    PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitContext, SafePushAfterCommitTarget,
-    SubmoduleTrustTarget,
+    MergeFastForward, PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitContext,
+    SafePushAfterCommitTarget, SubmoduleTrustTarget,
 };
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -110,7 +110,13 @@ fn repo_command_context(command: &RepoCommandKind) -> Option<String> {
         RepoCommandKind::PullBranch { remote, branch } => {
             format!("{remote}/{branch} → current branch")
         }
-        RepoCommandKind::MergeRef { reference } => format!("{reference} → current branch"),
+        RepoCommandKind::MergeRef {
+            reference,
+            fast_forward,
+        } => match fast_forward {
+            MergeFastForward::Allow => format!("{reference} → current branch"),
+            MergeFastForward::Never => format!("{reference} → current branch · no fast-forward"),
+        },
         RepoCommandKind::SquashRef { reference } => reference.clone(),
         RepoCommandKind::PushWithTags { request } => format!(
             "{} → {}/{} · {}",
@@ -1269,6 +1275,7 @@ fn schedule_merge_ref(
     msg_tx: StoreWorkerSender,
     repo_id: RepoId,
     reference: String,
+    fast_forward: MergeFastForward,
 ) {
     let command_reference = reference.clone();
     schedule_repo_command(
@@ -1278,8 +1285,9 @@ fn schedule_merge_ref(
         repo_id,
         RepoCommandKind::MergeRef {
             reference: command_reference,
+            fast_forward,
         },
-        move |repo| repo.merge_ref_with_output(&reference),
+        move |repo| repo.merge_ref_with_output(&reference, fast_forward),
     );
 }
 
@@ -2750,8 +2758,12 @@ pub(super) fn schedule(
             current_branch_context(thread_state, repo_id),
             auth,
         ),
-        RepoCommandEffect::MergeRef { repo_id, reference } => {
-            schedule_merge_ref(executor, repos, msg_tx, repo_id, reference);
+        RepoCommandEffect::MergeRef {
+            repo_id,
+            reference,
+            fast_forward,
+        } => {
+            schedule_merge_ref(executor, repos, msg_tx, repo_id, reference, fast_forward);
         }
         RepoCommandEffect::SquashRef { repo_id, reference } => {
             schedule_squash_ref(executor, repos, msg_tx, repo_id, reference);

@@ -14,9 +14,9 @@ use gitcomet_core::remote_url::RemoteUrlPolicy;
 use gitcomet_core::services::GitRepository;
 use gitcomet_core::services::{
     CheckoutRemoteBranchMode, CommandOutput, CommitOperationOutcome, ConflictSide, ForcePushLease,
-    InteractiveRebaseEntry, PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitContext,
-    SafePushAfterCommitDecision, SafePushAfterCommitTarget, SequencerState, SubmoduleTrustDecision,
-    SubmoduleTrustTarget,
+    InteractiveRebaseEntry, MergeFastForward, PullMode, RemoteUrlKind, ResetMode,
+    SafePushAfterCommitContext, SafePushAfterCommitDecision, SafePushAfterCommitTarget,
+    SequencerState, SubmoduleTrustDecision, SubmoduleTrustTarget,
 };
 use gitcomet_core::signing_tools::SigningToolsState;
 use std::path::PathBuf;
@@ -1009,6 +1009,7 @@ pub enum Msg {
     MergeRef {
         repo_id: RepoId,
         reference: String,
+        fast_forward: MergeFastForward,
     },
     SquashRef {
         repo_id: RepoId,

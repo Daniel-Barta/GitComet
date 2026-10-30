@@ -18,8 +18,8 @@ use gitcomet_core::conflict_session::{ConflictRegionResolution, ConflictResolver
 use gitcomet_core::domain::{DiffTarget, FileConflictKind, Upstream};
 use gitcomet_core::error::Error;
 use gitcomet_core::services::{
-    CheckoutRemoteBranchMode, CommandOutput, InteractiveRebaseEntry, PullMode, RemoteUrlKind,
-    ResetMode, SafePushAfterCommitTarget,
+    CheckoutRemoteBranchMode, CommandOutput, InteractiveRebaseEntry, MergeFastForward, PullMode,
+    RemoteUrlKind, ResetMode, SafePushAfterCommitTarget,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -549,10 +549,15 @@ pub(super) fn pull_branch(
     })]
 }
 
-pub(super) fn merge_ref(repo_id: RepoId, reference: String) -> Vec<Effect> {
+pub(super) fn merge_ref(
+    repo_id: RepoId,
+    reference: String,
+    fast_forward: MergeFastForward,
+) -> Vec<Effect> {
     vec![Effect::RepoCommand(RepoCommandEffect::MergeRef {
         repo_id,
         reference,
+        fast_forward,
     })]
 }
 

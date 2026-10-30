@@ -537,7 +537,9 @@ fn merge_creates_merge_commit_when_branches_diverged() {
     let backend = GixBackend;
     let opened = backend.open(repo).unwrap();
 
-    opened.merge_ref_with_output("feature").unwrap();
+    opened
+        .merge_ref_with_output("feature", MergeFastForward::Allow)
+        .unwrap();
 
     let parents = git_command()
         .arg("-C")
@@ -591,7 +593,9 @@ fn merge_fast_forwards_when_possible_even_if_merge_ff_is_disabled() {
     let backend = GixBackend;
     let opened = backend.open(repo).unwrap();
 
-    opened.merge_ref_with_output("feature").unwrap();
+    opened
+        .merge_ref_with_output("feature", MergeFastForward::Allow)
+        .unwrap();
 
     let parents = git_command()
         .arg("-C")
@@ -724,7 +728,11 @@ fn merge_commit_message_is_available_during_conflict() {
     let backend = GixBackend;
     let opened = backend.open(repo).unwrap();
 
-    assert!(opened.merge_ref_with_output("feature").is_err());
+    assert!(
+        opened
+            .merge_ref_with_output("feature", MergeFastForward::Allow)
+            .is_err()
+    );
 
     let msg = opened
         .merge_commit_message(&gitcomet_core::services::CancellationToken::new())
@@ -785,7 +793,11 @@ fn commit_finishes_merge_when_resolved_tree_matches_head() {
     let backend = GixBackend;
     let opened = backend.open(repo).unwrap();
 
-    assert!(opened.merge_ref_with_output("feature").is_err());
+    assert!(
+        opened
+            .merge_ref_with_output("feature", MergeFastForward::Allow)
+            .is_err()
+    );
     run_git(repo, &["checkout", "--ours", "a.txt"]);
     run_git(repo, &["add", "a.txt"]);
 
@@ -1192,7 +1204,11 @@ fn merge_abort_with_output_clears_conflict_state() {
     let backend = GixBackend;
     let opened = backend.open(repo).unwrap();
 
-    assert!(opened.merge_ref_with_output("feature").is_err());
+    assert!(
+        opened
+            .merge_ref_with_output("feature", MergeFastForward::Allow)
+            .is_err()
+    );
     assert!(
         opened
             .merge_commit_message(&gitcomet_core::services::CancellationToken::new())
