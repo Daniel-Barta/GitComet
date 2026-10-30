@@ -37,6 +37,46 @@ pub(in crate::view) struct ComparisonCardCache {
     pub _blocks: Vec<Arc<gitcomet_core::history_index::HistoryRange>>,
 }
 
+/// One parent id in the commit details: a selectable input and the link menu
+/// wrapping it. A merge shows one per parent.
+pub(in super::super) struct CommitDetailsParentField {
+    pub(in super::super) input: Entity<components::TextInput>,
+    pub(in super::super) link_menu: Entity<components::CommitLinkMenu>,
+    pub(in super::super) link_id: SharedString,
+}
+
+impl CommitDetailsParentField {
+    /// `ix` is the parent's position. The first parent keeps the plain menu id;
+    /// later ones carry git's parent number (`^2`, `^3`, ...).
+    fn new(ix: usize, root_view: WeakEntity<GitCometView>, cx: &mut gpui::App) -> Self {
+        let input = cx.new(|cx| {
+            let mut input =
+                components::TextInput::new_inert(components::TextInputOptions::selectable(), cx);
+            input.set_display_truncation(Some(components::TextTruncationProfile::Middle), cx);
+            input
+        });
+        let link_id: SharedString = if ix == 0 {
+            "commit_details_parent_link_menu".into()
+        } else {
+            format!("commit_details_parent_link_menu_{}", ix + 1).into()
+        };
+        let link_menu = cx.new(|_cx| {
+            components::CommitLinkMenu::new(
+                input.clone(),
+                RepoId(0),
+                Arc::<[components::MessageLink]>::from([]),
+                link_id.clone(),
+                root_view,
+            )
+        });
+        Self {
+            input,
+            link_menu,
+            link_id,
+        }
+    }
+}
+
 pub(in super::super) struct DetailsPaneView {
     pub(in crate::view) file_controllers: std::cell::RefCell<
         FxHashMap<
@@ -97,8 +137,9 @@ pub(in super::super) struct DetailsPaneView {
     pub(in super::super) commit_details_sha_link_menu: Entity<components::CommitLinkMenu>,
     pub(in super::super) commit_details_sha_input: Entity<components::TextInput>,
     pub(in super::super) commit_details_date_input: Entity<components::TextInput>,
-    pub(in super::super) commit_details_parent_input: Entity<components::TextInput>,
-    pub(in super::super) commit_details_parent_link_menu: Entity<components::CommitLinkMenu>,
+    /// One per parent of the shown commit, in git's order. Grown on demand and
+    /// never shrunk: only as many as the commit has parents are drawn.
+    pub(in super::super) commit_details_parent_fields: Vec<CommitDetailsParentField>,
     pub(in super::super) commit_message_drafts: FxHashMap<RepoId, SharedString>,
     pub(in super::super) commit_amend_enabled: bool,
     pub(in super::super) commit_push_after_enabled: bool,
@@ -422,21 +463,8 @@ impl DetailsPaneView {
             components::TextInput::new(components::TextInputOptions::selectable(), window, cx)
         });
 
-        let commit_details_parent_input = cx.new(|cx| {
-            let mut input =
-                components::TextInput::new(components::TextInputOptions::selectable(), window, cx);
-            input.set_display_truncation(Some(components::TextTruncationProfile::Middle), cx);
-            input
-        });
-        let commit_details_parent_link_menu = cx.new(|_cx| {
-            components::CommitLinkMenu::new(
-                commit_details_parent_input.clone(),
-                RepoId(0),
-                Arc::<[components::MessageLink]>::from([]),
-                "commit_details_parent_link_menu",
-                root_view.clone(),
-            )
-        });
+        let commit_details_parent_fields =
+            vec![CommitDetailsParentField::new(0, root_view.clone(), cx)];
 
         let commit_details_sha_link_menu = cx.new(|_cx| {
             components::CommitLinkMenu::new(
@@ -519,8 +547,7 @@ impl DetailsPaneView {
             commit_details_sha_link_menu,
             commit_details_sha_input,
             commit_details_date_input,
-            commit_details_parent_input,
-            commit_details_parent_link_menu,
+            commit_details_parent_fields,
             commit_message_drafts: FxHashMap::default(),
             commit_amend_enabled: false,
             commit_push_after_enabled,
@@ -660,6 +687,22 @@ impl DetailsPaneView {
             self.show_timezone,
         );
         buf
+    }
+
+    /// Makes room for `count` parent fields; an octopus merge can need many.
+    pub(in super::super) fn ensure_commit_details_parent_fields(
+        &mut self,
+        count: usize,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        while self.commit_details_parent_fields.len() < count {
+            let field = CommitDetailsParentField::new(
+                self.commit_details_parent_fields.len(),
+                self.root_view.clone(),
+                cx,
+            );
+            self.commit_details_parent_fields.push(field);
+        }
     }
 
     fn change_tracking_height_design(&self) -> Option<f32> {
