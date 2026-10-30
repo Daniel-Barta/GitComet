@@ -627,6 +627,20 @@ fn model_with_header(
             kind: PopoverKind::MergeCommitConfirm {
                 repo_id,
                 commit_id: commit_id.clone(),
+                fast_forward: MergeFastForward::Allow,
+            },
+        }),
+    });
+    items.push(ContextMenuItem::Entry {
+        label: format!("Merge {short} into {merge_destination} (no fast-forward)").into(),
+        icon: Some("icons/swap.svg".into()),
+        shortcut: Some("N".into()),
+        disabled: merge_into_current_disabled,
+        action: Box::new(ContextMenuAction::OpenPopover {
+            kind: PopoverKind::MergeCommitConfirm {
+                repo_id,
+                commit_id: commit_id.clone(),
+                fast_forward: MergeFastForward::Never,
             },
         }),
     });

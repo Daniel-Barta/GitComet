@@ -1403,7 +1403,7 @@ fn summarize_command(
             };
             format!("Pull {remote}/{branch}: {base}")
         }
-        RepoCommandKind::MergeRef { reference } => {
+        RepoCommandKind::MergeRef { reference, .. } => {
             let base = if output.stdout.contains("Already up to date") {
                 "Already up to date"
             } else if output.stdout.contains("Fast-forward")

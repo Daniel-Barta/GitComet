@@ -1714,12 +1714,16 @@ fn reduce_inner(
             Some(effects) => effects,
             None => actions_emit_effects::pull_branch(repos, state, repo_id, remote, branch),
         },
-        Msg::MergeRef { repo_id, reference } => {
+        Msg::MergeRef {
+            repo_id,
+            reference,
+            fast_forward,
+        } => {
             if let Some(effects) = annex_adjusted_refusal(inputs, state, repo_id, "Merge") {
                 return effects;
             }
             begin_local_action(state, repo_id);
-            actions_emit_effects::merge_ref(repo_id, reference)
+            actions_emit_effects::merge_ref(repo_id, reference, fast_forward)
         }
         Msg::SquashRef { repo_id, reference } => {
             if let Some(effects) = annex_adjusted_refusal(inputs, state, repo_id, "Squash merge") {

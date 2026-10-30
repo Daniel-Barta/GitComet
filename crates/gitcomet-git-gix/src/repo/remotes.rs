@@ -10,8 +10,8 @@ use gitcomet_core::domain::{CommitId, Remote, RemoteBranch, Upstream};
 use gitcomet_core::error::{Error, ErrorKind, GitFailure, GitFailureId};
 use gitcomet_core::remote_url::{RemoteUrlPolicy, validate_remote_url_with_policy};
 use gitcomet_core::services::{
-    CancellationToken, CommandOutput, ForcePushLease, PullMode, RemoteUrlKind, Result,
-    SafePushAfterCommitContext, SafePushAfterCommitDecision, SafePushAfterCommitTarget,
+    CancellationToken, CommandOutput, ForcePushLease, MergeFastForward, PullMode, RemoteUrlKind,
+    Result, SafePushAfterCommitContext, SafePushAfterCommitDecision, SafePushAfterCommitTarget,
 };
 use gitcomet_core::text_utils::redact_url_userinfo;
 use gix::bstr::ByteSlice as _;
@@ -2031,7 +2031,8 @@ impl GixRepo {
                 if !self.reference_exists(&tracking_ref)? {
                     return Err(remote_branch_gone_after_fetch_error(remote, branch));
                 }
-                let merge_output = self.merge_ref_with_output_impl(&tracking_ref)?;
+                let merge_output =
+                    self.merge_ref_with_output_impl(&tracking_ref, MergeFastForward::Allow)?;
                 return Ok(CommandOutput::combine(
                     format!("git fetch {remote} --prune && git merge {tracking_ref}"),
                     &[prune_output, merge_output],
@@ -2052,7 +2053,8 @@ impl GixRepo {
                 });
                 return Err(remote_branch_gone_after_fetch_error(remote, branch));
             };
-            let merge_output = self.merge_ref_with_output_impl(tip.as_ref())?;
+            let merge_output =
+                self.merge_ref_with_output_impl(tip.as_ref(), MergeFastForward::Allow)?;
             return Ok(CommandOutput::combine(
                 format!(
                     "git fetch {remote} --prune && git fetch {remote} refs/heads/{branch} && git merge {tip}"
@@ -2082,15 +2084,23 @@ impl GixRepo {
         self.run_integrating_git(cmd, &command_str, true)
     }
 
-    pub(super) fn merge_ref_with_output_impl(&self, reference: &str) -> Result<CommandOutput> {
+    pub(super) fn merge_ref_with_output_impl(
+        &self,
+        reference: &str,
+        fast_forward: MergeFastForward,
+    ) -> Result<CommandOutput> {
         validate_ref_like_arg(reference, "reference")?;
 
-        let command_str = format!("git merge --ff --no-edit {reference}");
+        let ff_flag = match fast_forward {
+            MergeFastForward::Allow => "--ff",
+            MergeFastForward::Never => "--no-ff",
+        };
+        let command_str = format!("git merge {ff_flag} --no-edit {reference}");
         let mut cmd = self.git_workdir_cmd();
         cmd.args(NO_COLOR_CONFIG)
             .arg("--no-pager")
             .arg("merge")
-            .arg("--ff")
+            .arg(ff_flag)
             .arg("--no-edit")
             .arg("--")
             .arg(reference);

@@ -240,16 +240,7 @@ pub(super) fn model(
                     branch: name.clone(),
                 }),
             });
-            items.push(ContextMenuItem::Entry {
-                label: "Merge into current".into(),
-                icon: Some("icons/swap.svg".into()),
-                shortcut: None,
-                disabled: merge_disabled,
-                action: Box::new(ContextMenuAction::MergeRef {
-                    repo_id,
-                    reference: action_reference.clone(),
-                }),
-            });
+            push_merge_into_current_entries(&mut items, repo_id, &action_reference, merge_disabled);
             items.push(ContextMenuItem::Entry {
                 label: "Squash into current".into(),
                 icon: Some("icons/arrow_right.svg".into()),
@@ -299,16 +290,7 @@ pub(super) fn model(
                     branch: branch.to_string(),
                 }),
             });
-            items.push(ContextMenuItem::Entry {
-                label: "Merge into current".into(),
-                icon: Some("icons/swap.svg".into()),
-                shortcut: None,
-                disabled: merge_disabled,
-                action: Box::new(ContextMenuAction::MergeRef {
-                    repo_id,
-                    reference: action_reference.clone(),
-                }),
-            });
+            push_merge_into_current_entries(&mut items, repo_id, &action_reference, merge_disabled);
             items.push(ContextMenuItem::Entry {
                 label: "Squash into current".into(),
                 icon: Some("icons/arrow_right.svg".into()),
@@ -401,4 +383,31 @@ pub(super) fn model(
     }
 
     ContextMenuModel::new(items)
+}
+
+fn push_merge_into_current_entries(
+    items: &mut Vec<ContextMenuItem>,
+    repo_id: RepoId,
+    reference: &str,
+    disabled: bool,
+) {
+    for (label, fast_forward) in [
+        ("Merge into current", MergeFastForward::Allow),
+        (
+            "Merge into current (no fast-forward)",
+            MergeFastForward::Never,
+        ),
+    ] {
+        items.push(ContextMenuItem::Entry {
+            label: label.into(),
+            icon: Some("icons/swap.svg".into()),
+            shortcut: None,
+            disabled,
+            action: Box::new(ContextMenuAction::MergeRef {
+                repo_id,
+                reference: reference.to_string(),
+                fast_forward,
+            }),
+        });
+    }
 }

@@ -17,7 +17,9 @@ use gitcomet_core::file_diff::FileDiffRow;
 use gitcomet_core::git_operation::GitOperationId;
 use gitcomet_core::process::current_git_runtime;
 use gitcomet_core::remote_url::{RemoteProtocol, RemoteUrlPolicy};
-use gitcomet_core::services::{CheckoutRemoteBranchMode, PullMode, RemoteUrlKind, ResetMode};
+use gitcomet_core::services::{
+    CheckoutRemoteBranchMode, MergeFastForward, PullMode, RemoteUrlKind, ResetMode,
+};
 use gitcomet_state::model::{
     AppNotificationKind, AppState, AuthPromptKind, AuthPromptStatus, BranchExistsPromptOperation,
     BranchExistsPromptState, CloneOpState, CloneOpStatus, DefaultTagType, DiagnosticKind,

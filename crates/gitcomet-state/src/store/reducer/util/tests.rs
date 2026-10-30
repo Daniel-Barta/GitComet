@@ -8,7 +8,7 @@ use crate::msg::RepoCommandKind;
 use gitcomet_core::auth::SSH_PASSPHRASE_PROMPT_MARKER;
 use gitcomet_core::domain::{CommitId, DiffArea, DiffTarget, RepoSpec};
 use gitcomet_core::error::{GitFailure, GitFailureId};
-use gitcomet_core::services::{PullMode, RemoteUrlKind, ResetMode};
+use gitcomet_core::services::{MergeFastForward, PullMode, RemoteUrlKind, ResetMode};
 use std::path::Path;
 
 fn repo_state(id: u64) -> RepoState {
@@ -564,6 +564,7 @@ fn summarize_command_failure_covers_error_labels() {
         (
             RepoCommandKind::MergeRef {
                 reference: "feature".into(),
+                fast_forward: MergeFastForward::Allow,
             },
             "Merge",
         ),
@@ -830,12 +831,28 @@ fn summarize_command_success_covers_status_variants() {
     let (_, merge_ref_summary) = summarize_command(
         &RepoCommandKind::MergeRef {
             reference: "feature".into(),
+            fast_forward: MergeFastForward::Allow,
         },
         &command_output("git merge feature", "Fast-forward", ""),
         true,
         None,
     );
     assert_eq!(merge_ref_summary, "Merge feature: Fast-forwarded");
+
+    let (_, merge_ref_no_ff_summary) = summarize_command(
+        &RepoCommandKind::MergeRef {
+            reference: "feature".into(),
+            fast_forward: MergeFastForward::Never,
+        },
+        &command_output(
+            "git merge --no-ff feature",
+            "Merge made by the 'ort' strategy.",
+            "",
+        ),
+        true,
+        None,
+    );
+    assert_eq!(merge_ref_no_ff_summary, "Merge feature: Merged");
 
     let (_, squash_ref_summary) = summarize_command(
         &RepoCommandKind::SquashRef {

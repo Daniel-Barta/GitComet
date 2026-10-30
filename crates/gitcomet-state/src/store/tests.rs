@@ -8,7 +8,9 @@ use gitcomet_core::domain::{
 };
 use gitcomet_core::error::{Error, ErrorKind};
 use gitcomet_core::path_utils::canonicalize_or_original;
-use gitcomet_core::services::{CancellationToken, CommandOutput, PullMode, Result};
+use gitcomet_core::services::{
+    CancellationToken, CommandOutput, MergeFastForward, PullMode, Result,
+};
 use gitcomet_core::test_support::UnconfiguredRepository;
 use std::fs;
 use std::path::{Path, PathBuf};

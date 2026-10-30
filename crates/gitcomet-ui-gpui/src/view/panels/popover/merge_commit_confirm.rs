@@ -24,6 +24,7 @@ pub(super) fn panel(
     this: &mut PopoverHost,
     repo_id: RepoId,
     commit_id: CommitId,
+    fast_forward: MergeFastForward,
     cx: &mut gpui::Context<PopoverHost>,
 ) -> gpui::Div {
     let theme = this.theme;
@@ -53,16 +54,20 @@ pub(super) fn panel(
         this.store.dispatch(Msg::MergeRef {
             repo_id,
             reference: commit_id.as_ref().to_string(),
+            fast_forward,
         });
         this.close_popover(cx);
     };
 
+    let note = match fast_forward {
+        MergeFastForward::Allow => {
+            "Git resolves the merge with a merge commit when history diverges."
+        }
+        MergeFastForward::Never => "Git creates a merge commit even when it could fast-forward.",
+    };
     let mut dialog = ConfirmDialog::new("Merge commit?", DIALOG_380_WIDTH)
         .text(theme, format!("Merge {short} into {destination}?"))
-        .note(
-            theme,
-            "Git resolves the merge with a merge commit when history diverges.",
-        );
+        .note(theme, note);
     if !summary.is_empty() {
         dialog = dialog.note(theme, summary);
     }

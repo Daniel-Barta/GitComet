@@ -6,7 +6,7 @@ use gitcomet_core::process::{
     install_git_executable_preference,
 };
 use gitcomet_core::remote_url::{RemoteProtocol, RemoteUrlPolicy};
-use gitcomet_core::services::{GitBackend, PullMode, RemoteUrlKind};
+use gitcomet_core::services::{GitBackend, MergeFastForward, PullMode, RemoteUrlKind};
 use gitcomet_core::test_support::git_fixture::{FixtureTimer, append_config, init_repository};
 use gitcomet_git_gix::GixBackend;
 use std::fs;
@@ -1722,7 +1722,9 @@ fn integrating_commands_print_no_colour_under_color_diff_always() {
     run_git(repo, &["config", "color.diff", "always"]);
 
     let opened = GixBackend.open(repo).expect("open repository");
-    let merged = opened.merge_ref_with_output("dev").expect("merge");
+    let merged = opened
+        .merge_ref_with_output("dev", MergeFastForward::Allow)
+        .expect("merge");
     run_git(repo, &["reset", "-q", "--hard", "HEAD~1"]);
     let squashed = opened.squash_ref_with_output("dev").expect("squash");
     run_git(repo, &["reset", "-q", "--hard", "HEAD"]);
@@ -1745,7 +1747,7 @@ fn merge_ref_stopped_at_conflicts_says_so() {
     let backend = GixBackend;
     let opened = backend.open(repo).expect("open repository");
     let error = opened
-        .merge_ref_with_output("dev")
+        .merge_ref_with_output("dev", MergeFastForward::Allow)
         .expect_err("conflicting merge");
 
     let detail = stopped_at_conflicts_detail(&error);
@@ -1753,6 +1755,33 @@ fn merge_ref_stopped_at_conflicts_says_so() {
         detail.starts_with("Merge conflict in base.txt."),
         "{detail}"
     );
+}
+
+#[test]
+fn merge_ref_without_fast_forward_creates_merge_commit() {
+    let _guard = remote_management_test_lock();
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let repo = dir.path();
+    init_repo_with_user(repo);
+    run_git(repo, &["branch", "-m", "main"]);
+    fs::write(repo.join("base.txt"), "base\n").expect("write base file");
+    run_git(repo, &["add", "base.txt"]);
+    run_git(repo, &["commit", "-m", "base"]);
+    run_git(repo, &["checkout", "-b", "dev"]);
+    fs::write(repo.join("base.txt"), "base\ndev\n").expect("write dev change");
+    run_git(repo, &["commit", "-am", "dev"]);
+    run_git(repo, &["checkout", "main"]);
+    let base = run_git_capture(repo, &["rev-parse", "HEAD"]);
+    let dev = run_git_capture(repo, &["rev-parse", "dev"]);
+
+    let opened = GixBackend.open(repo).expect("open repository");
+    let output = opened
+        .merge_ref_with_output("dev", MergeFastForward::Never)
+        .expect("merge");
+
+    assert_eq!(output.command, "git merge --no-ff --no-edit dev");
+    let parents = run_git_capture(repo, &["rev-parse", "HEAD^1", "HEAD^2"]);
+    assert_eq!(parents, format!("{base}{dev}"));
 }
 
 #[test]

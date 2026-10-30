@@ -977,8 +977,16 @@ impl PopoverHost {
                     branch,
                 });
             }
-            ContextMenuAction::MergeRef { repo_id, reference } => {
-                self.store.dispatch(Msg::MergeRef { repo_id, reference });
+            ContextMenuAction::MergeRef {
+                repo_id,
+                reference,
+                fast_forward,
+            } => {
+                self.store.dispatch(Msg::MergeRef {
+                    repo_id,
+                    reference,
+                    fast_forward,
+                });
             }
             ContextMenuAction::SquashRef { repo_id, reference } => {
                 self.store.dispatch(Msg::SquashRef { repo_id, reference });

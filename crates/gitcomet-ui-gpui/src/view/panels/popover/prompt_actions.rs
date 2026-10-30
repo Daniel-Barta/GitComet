@@ -225,9 +225,11 @@ impl PopoverHost {
             PopoverKind::ApplyFileChangeConfirm { repo_id, target } => {
                 apply_file_change_confirm::panel(self, repo_id, target, cx)
             }
-            PopoverKind::MergeCommitConfirm { repo_id, commit_id } => {
-                merge_commit_confirm::panel(self, repo_id, commit_id, cx)
-            }
+            PopoverKind::MergeCommitConfirm {
+                repo_id,
+                commit_id,
+                fast_forward,
+            } => merge_commit_confirm::panel(self, repo_id, commit_id, fast_forward, cx),
             PopoverKind::MergeAbortConfirm { repo_id } => {
                 merge_abort_confirm::panel(self, repo_id, cx)
             }

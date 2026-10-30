@@ -13,20 +13,27 @@ fn merge_ref_emits_effect() {
     ));
     state.active_repo = Some(RepoId(1));
 
-    let effects = reduce(
-        &mut repos,
-        &id_alloc,
-        &mut state,
-        Msg::MergeRef {
-            repo_id: RepoId(1),
-            reference: "feature".to_string(),
-        },
-    );
+    for fast_forward in [MergeFastForward::Allow, MergeFastForward::Never] {
+        let effects = reduce(
+            &mut repos,
+            &id_alloc,
+            &mut state,
+            Msg::MergeRef {
+                repo_id: RepoId(1),
+                reference: "feature".to_string(),
+                fast_forward,
+            },
+        );
 
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::RepoCommand(RepoCommandEffect::MergeRef { repo_id: RepoId(1), reference })] if reference == "feature"
-    ));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::RepoCommand(RepoCommandEffect::MergeRef {
+                repo_id: RepoId(1),
+                reference,
+                fast_forward: emitted,
+            })] if reference == "feature" && *emitted == fast_forward
+        ));
+    }
 }
 
 #[test]
@@ -416,9 +423,11 @@ fn sequencer_commands_release_their_in_flight_count() {
             Msg::MergeRef {
                 repo_id,
                 reference: "topic".into(),
+                fast_forward: MergeFastForward::Allow,
             },
             RepoCommandKind::MergeRef {
                 reference: "topic".into(),
+                fast_forward: MergeFastForward::Allow,
             },
         ),
     ];

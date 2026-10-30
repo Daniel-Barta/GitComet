@@ -13,9 +13,9 @@ use gitcomet_core::remote_url::RemoteUrlPolicy;
 use gitcomet_core::services::{
     BlameLine, CancellationToken, CheckoutRemoteBranchMode, CommandOutput, CommitOperationOutcome,
     ConflictFileStages, ConflictSide, ForcePushLease, GitRepository, InteractiveRebaseEntry,
-    MergetoolResult, PullMode, RemoteUrlKind, ResetMode, Result, SafePushAfterCommitContext,
-    SafePushAfterCommitDecision, SafePushAfterCommitTarget, SequencerState, SubmoduleTrustDecision,
-    SubmoduleTrustTarget,
+    MergeFastForward, MergetoolResult, PullMode, RemoteUrlKind, ResetMode, Result,
+    SafePushAfterCommitContext, SafePushAfterCommitDecision, SafePushAfterCommitTarget,
+    SequencerState, SubmoduleTrustDecision, SubmoduleTrustTarget,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1018,8 +1018,12 @@ impl GitRepository for GixRepo {
         self.pull_branch_with_output_prune_impl(remote, branch, prune)
     }
 
-    fn merge_ref_with_output(&self, reference: &str) -> Result<CommandOutput> {
-        self.merge_ref_with_output_impl(reference)
+    fn merge_ref_with_output(
+        &self,
+        reference: &str,
+        fast_forward: MergeFastForward,
+    ) -> Result<CommandOutput> {
+        self.merge_ref_with_output_impl(reference, fast_forward)
     }
 
     fn squash_ref_with_output(&self, reference: &str) -> Result<CommandOutput> {
