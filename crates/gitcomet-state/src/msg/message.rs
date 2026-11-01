@@ -12,11 +12,12 @@ use gitcomet_core::git_operation::{GitOperationEvent, GitOperationId};
 use gitcomet_core::process::GitRuntimeState;
 use gitcomet_core::remote_url::RemoteUrlPolicy;
 use gitcomet_core::services::GitRepository;
+use gitcomet_core::services::MergeFastForward;
 use gitcomet_core::services::{
     CheckoutRemoteBranchMode, CommandOutput, CommitOperationOutcome, ConflictSide, ForcePushLease,
-    InteractiveRebaseEntry, MergeFastForward, PullMode, RemoteUrlKind, ResetMode,
-    SafePushAfterCommitContext, SafePushAfterCommitDecision, SafePushAfterCommitTarget,
-    SequencerState, SubmoduleTrustDecision, SubmoduleTrustTarget, WorktreeCheckout,
+    InteractiveRebaseEntry, PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitContext,
+    SafePushAfterCommitDecision, SafePushAfterCommitTarget, SequencerState, SubmoduleTrustDecision,
+    SubmoduleTrustTarget, WorktreeCheckout,
 };
 use gitcomet_core::signing_tools::SigningToolsState;
 use std::path::PathBuf;

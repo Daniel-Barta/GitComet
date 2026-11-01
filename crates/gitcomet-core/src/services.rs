@@ -1840,13 +1840,16 @@ pub trait GitRepository: Send + Sync {
         )))
     }
 
-    fn merge_ref_with_output(
-        &self,
-        _reference: &str,
-        _fast_forward: MergeFastForward,
-    ) -> Result<CommandOutput> {
+    fn merge_ref_with_output(&self, _reference: &str) -> Result<CommandOutput> {
         Err(Error::new(ErrorKind::Unsupported(
             "merging a specific ref is not implemented for this backend",
+        )))
+    }
+
+    /// `git merge --no-ff`: always creates a merge commit.
+    fn merge_ref_no_ff_with_output(&self, _reference: &str) -> Result<CommandOutput> {
+        Err(Error::new(ErrorKind::Unsupported(
+            "merging a specific ref without fast-forward is not implemented for this backend",
         )))
     }
 

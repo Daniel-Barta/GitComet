@@ -1,7 +1,7 @@
 use crate::test_git_env;
 use gitcomet_core::error::{ErrorKind, GitFailureId};
 use gitcomet_core::remote_url::{RemoteProtocol, RemoteUrlPolicy};
-use gitcomet_core::services::{GitBackend, MergeFastForward, PullMode, RemoteUrlKind};
+use gitcomet_core::services::{GitBackend, PullMode, RemoteUrlKind};
 use gitcomet_core::test_support::git_fixture::{FixtureTimer, append_config, init_repository};
 use gitcomet_git_gix::GixBackend;
 use std::fs;
@@ -1856,9 +1856,7 @@ fn integrating_commands_print_no_colour_under_color_diff_always() {
     run_git(repo, &["config", "color.diff", "always"]);
 
     let opened = GixBackend.open(repo).expect("open repository");
-    let merged = opened
-        .merge_ref_with_output("dev", MergeFastForward::Allow)
-        .expect("merge");
+    let merged = opened.merge_ref_with_output("dev").expect("merge");
     run_git(repo, &["reset", "-q", "--hard", "HEAD~1"]);
     let squashed = opened.squash_ref_with_output("dev").expect("squash");
     run_git(repo, &["reset", "-q", "--hard", "HEAD"]);
@@ -1879,7 +1877,7 @@ fn merge_ref_stopped_at_conflicts_says_so() {
     let backend = GixBackend;
     let opened = backend.open(repo).expect("open repository");
     let error = opened
-        .merge_ref_with_output("dev", MergeFastForward::Allow)
+        .merge_ref_with_output("dev")
         .expect_err("conflicting merge");
 
     let detail = stopped_at_conflicts_detail(&error);
@@ -1907,9 +1905,7 @@ fn merge_ref_without_fast_forward_creates_merge_commit() {
     let dev = run_git_capture(repo, &["rev-parse", "dev"]);
 
     let opened = GixBackend.open(repo).expect("open repository");
-    let output = opened
-        .merge_ref_with_output("dev", MergeFastForward::Never)
-        .expect("merge");
+    let output = opened.merge_ref_no_ff_with_output("dev").expect("merge");
 
     assert_eq!(output.command, "git merge --no-ff --no-edit dev");
     let parents = run_git_capture(repo, &["rev-parse", "HEAD^1", "HEAD^2"]);

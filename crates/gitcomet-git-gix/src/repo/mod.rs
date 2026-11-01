@@ -13,10 +13,9 @@ use gitcomet_core::remote_url::RemoteUrlPolicy;
 use gitcomet_core::services::{
     BlameLine, CancellationToken, CheckoutRemoteBranchMode, CommandOutput, CommitOperationOutcome,
     ConflictFileStages, ConflictSide, ForcePushLease, GitRepository, InteractiveRebaseEntry,
-    MergeFastForward, MergetoolResult, PullMode, RemoteUrlKind, ResetMode, Result,
-    RewordCommitOutcome, SafePushAfterCommitContext, SafePushAfterCommitDecision,
-    SafePushAfterCommitTarget, SequencerState, SubmoduleTrustDecision, SubmoduleTrustTarget,
-    WorktreeCheckout,
+    MergetoolResult, PullMode, RemoteUrlKind, ResetMode, Result, RewordCommitOutcome,
+    SafePushAfterCommitContext, SafePushAfterCommitDecision, SafePushAfterCommitTarget,
+    SequencerState, SubmoduleTrustDecision, SubmoduleTrustTarget, WorktreeCheckout,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1189,14 +1188,16 @@ impl GitRepository for GixRepo {
         self.pull_branch_with_output_impl(remote, branch)
     }
 
-    fn merge_ref_with_output(
-        &self,
-        reference: &str,
-        fast_forward: MergeFastForward,
-    ) -> Result<CommandOutput> {
+    fn merge_ref_with_output(&self, reference: &str) -> Result<CommandOutput> {
         let _operation = self.operation_lease()?;
         self.require_working_tree()?;
-        self.merge_ref_with_output_impl(reference, fast_forward)
+        self.merge_ref_with_output_impl(reference, "--ff")
+    }
+
+    fn merge_ref_no_ff_with_output(&self, reference: &str) -> Result<CommandOutput> {
+        let _operation = self.operation_lease()?;
+        self.require_working_tree()?;
+        self.merge_ref_with_output_impl(reference, "--no-ff")
     }
 
     fn squash_ref_with_output(&self, reference: &str) -> Result<CommandOutput> {

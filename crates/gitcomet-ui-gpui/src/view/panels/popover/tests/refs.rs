@@ -1300,40 +1300,41 @@ fn local_branch_menu_has_pull_merge_and_squash_actions(cx: &mut gpui::TestAppCon
             _ => panic!("expected Pull into current entry with PullBranch action"),
         }
 
-        for (merge_label, expected_fast_forward) in [
-            ("Merge into current", MergeFastForward::Allow),
-            (
-                "Merge into current (no fast-forward)",
-                MergeFastForward::Never,
-            ),
-        ] {
-            let merge_entry = model.items.iter().find_map(|item| match item {
-                ContextMenuItem::Entry {
-                    label,
-                    action,
-                    disabled,
-                    ..
-                } if label.as_ref() == merge_label => Some(((**action).clone(), *disabled)),
-                _ => None,
-            });
+        let merge_entry = model.items.iter().find_map(|item| match item {
+            ContextMenuItem::Entry {
+                label,
+                action,
+                disabled,
+                ..
+            } if label.as_ref() == "Merge into current" => Some(((**action).clone(), *disabled)),
+            _ => None,
+        });
 
-            match merge_entry {
-                Some((
-                    ContextMenuAction::MergeRef {
-                        repo_id: rid,
-                        reference,
-                        fast_forward,
-                    },
-                    disabled,
-                )) => {
-                    assert_eq!(rid, repo_id);
-                    assert_eq!(reference, branch_name);
-                    assert_eq!(fast_forward, expected_fast_forward);
-                    assert!(!disabled);
-                }
-                _ => panic!("expected {merge_label} entry with MergeRef action"),
+        match merge_entry {
+            Some((
+                ContextMenuAction::MergeRef {
+                    repo_id: rid,
+                    reference,
+                    fast_forward: MergeFastForward::Allow,
+                },
+                disabled,
+            )) => {
+                assert_eq!(rid, repo_id);
+                assert_eq!(reference, branch_name);
+                assert!(!disabled);
             }
+            _ => panic!("expected Merge into current entry with MergeRef action"),
         }
+        assert!(model.items.iter().any(|item| matches!(
+            item,
+            ContextMenuItem::Entry { label, action, disabled: false, .. }
+                if label.as_ref() == "Merge into current (no fast-forward)"
+                    && matches!(
+                        &**action,
+                        ContextMenuAction::MergeRef { repo_id: rid, reference, fast_forward: MergeFastForward::Never }
+                            if *rid == repo_id && *reference == branch_name
+                    )
+        )));
 
         let squash_entry = model.items.iter().find_map(|item| match item {
             ContextMenuItem::Entry {
@@ -1556,39 +1557,30 @@ fn remote_branch_menu_has_pull_merge_and_squash_actions(cx: &mut gpui::TestAppCo
             _ => panic!("expected Pull into current entry with PullBranch action"),
         }
 
-        for (merge_label, expected_fast_forward) in [
-            ("Merge into current", MergeFastForward::Allow),
-            (
-                "Merge into current (no fast-forward)",
-                MergeFastForward::Never,
-            ),
-        ] {
-            let merge_entry = model.items.iter().find_map(|item| match item {
-                ContextMenuItem::Entry {
-                    label,
-                    action,
-                    disabled,
-                    ..
-                } if label.as_ref() == merge_label => Some(((**action).clone(), *disabled)),
-                _ => None,
-            });
+        let merge_entry = model.items.iter().find_map(|item| match item {
+            ContextMenuItem::Entry {
+                label,
+                action,
+                disabled,
+                ..
+            } if label.as_ref() == "Merge into current" => Some(((**action).clone(), *disabled)),
+            _ => None,
+        });
 
-            match merge_entry {
-                Some((
-                    ContextMenuAction::MergeRef {
-                        repo_id: rid,
-                        reference,
-                        fast_forward,
-                    },
-                    disabled,
-                )) => {
-                    assert_eq!(rid, repo_id);
-                    assert_eq!(reference, branch_name);
-                    assert_eq!(fast_forward, expected_fast_forward);
-                    assert!(!disabled);
-                }
-                _ => panic!("expected {merge_label} entry with MergeRef action"),
+        match merge_entry {
+            Some((
+                ContextMenuAction::MergeRef {
+                    repo_id: rid,
+                    reference,
+                    fast_forward: MergeFastForward::Allow,
+                },
+                disabled,
+            )) => {
+                assert_eq!(rid, repo_id);
+                assert_eq!(reference, branch_name);
+                assert!(!disabled);
             }
+            _ => panic!("expected Merge into current entry with MergeRef action"),
         }
 
         let squash_entry = model.items.iter().find_map(|item| match item {
@@ -1753,7 +1745,7 @@ fn remote_branch_menu_preserves_exact_identity_and_uses_its_loaded_tip(
         ));
         assert!(matches!(
             action("Merge into current (no fast-forward)"),
-            Some(ContextMenuAction::MergeRef { reference, .. }) if reference == selected_tip
+            Some(ContextMenuAction::MergeRef { reference, fast_forward: MergeFastForward::Never, .. }) if reference == selected_tip
         ));
         assert!(matches!(
             action("Squash into current"),

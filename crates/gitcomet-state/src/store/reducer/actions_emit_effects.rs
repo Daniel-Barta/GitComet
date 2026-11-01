@@ -17,9 +17,10 @@ use gitcomet_core::auth::StagedGitAuth;
 use gitcomet_core::conflict_session::{ConflictRegionResolution, ConflictResolverStrategy};
 use gitcomet_core::domain::{DiffTarget, FileConflictKind, Upstream};
 use gitcomet_core::error::Error;
+use gitcomet_core::services::MergeFastForward;
 use gitcomet_core::services::{
-    CheckoutRemoteBranchMode, CommandOutput, InteractiveRebaseEntry, MergeFastForward, PullMode,
-    RemoteUrlKind, ResetMode, SafePushAfterCommitTarget, WorktreeCheckout,
+    CheckoutRemoteBranchMode, CommandOutput, InteractiveRebaseEntry, PullMode, RemoteUrlKind,
+    ResetMode, SafePushAfterCommitTarget, WorktreeCheckout,
 };
 use std::path::PathBuf;
 use std::sync::Arc;

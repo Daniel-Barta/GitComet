@@ -98,7 +98,7 @@ fn direct_worktree_mutations_and_reads_refuse_bare_without_changing_git_data() {
     reject!(repo.discard_worktree_changes(&[Path::new("config")]));
     reject!(repo.pull(PullMode::Default));
     reject!(repo.pull_branch_with_output("origin", "main"));
-    reject!(repo.merge_ref_with_output("HEAD", MergeFastForward::Allow));
+    reject!(repo.merge_ref_with_output("HEAD"));
     reject!(repo.squash_ref_with_output("HEAD"));
     reject!(repo.merge_abort_with_output());
     reject!(repo.rebase_with_output("HEAD"));

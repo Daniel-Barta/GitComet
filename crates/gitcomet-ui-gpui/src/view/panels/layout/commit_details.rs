@@ -150,6 +150,11 @@ impl DetailsPaneView {
                 if !current && show_delayed_loading {
                     components::empty_state(theme, "Commit", "Loading").into_any_element()
                 } else {
+                    let parent = details
+                        .parent_ids
+                        .first()
+                        .map(|p: &CommitId| p.as_ref().to_string())
+                        .unwrap_or_else(|| "—".to_string());
                     let find = self.commit_details_find_highlights(details);
 
                     if current {
@@ -187,31 +192,20 @@ impl DetailsPaneView {
                         self.commit_details_date_display(details).as_str(),
                         cx,
                     );
-                    self.sync_commit_details_parent_fields(
+                    self.sync_commit_details_parent_input(
+                        parent.as_str(),
+                        if current { repo_id } else { RepoId(0) },
+                        current && parent != "—",
+                        theme,
+                        cx,
+                    );
+                    self.sync_commit_details_extra_parent_fields(
                         &details.parent_ids,
                         if current { repo_id } else { RepoId(0) },
                         current,
                         theme,
                         cx,
                     );
-                    let parent_label = if details.parent_ids.len() > 1 {
-                        "Parent commit SHAs"
-                    } else {
-                        "Parent commit SHA"
-                    };
-                    let parent_values = self.commit_details_parent_fields
-                        [..details.parent_ids.len().max(1)]
-                        .iter()
-                        .map(|field| {
-                            if current {
-                                commit_details_monospace_element(
-                                    field.link_menu.clone().into_any_element(),
-                                )
-                            } else {
-                                commit_details_monospace_value(field.input.clone())
-                            }
-                        })
-                        .collect::<Vec<_>>();
 
                     let message = if current {
                         let availability = self
@@ -293,17 +287,10 @@ impl DetailsPaneView {
                                         self.commit_details_date_input.clone(),
                                     ),
                                 ))
-                                .child(commit_details_selectable_row(
+                                .child(self.commit_details_parent_row(
                                     theme,
-                                    parent_label,
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .w_full()
-                                        .min_w(px(0.0))
-                                        .children(parent_values)
-                                        .into_any_element(),
+                                    details.parent_ids.len(),
+                                    current,
                                 )),
                         )
                         .child(self.commit_files_section(repo_id, commit_details_rev, details, cx))

@@ -1,8 +1,8 @@
 use super::CancellationToken;
 use super::{
     BlameLine, CheckoutRemoteBranchMode, CommandOutput, ConflictSide, GitBackend, GitRepository,
-    MergeFastForward, PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitTarget,
-    UnavailableGitBackend, decode_utf8_optional, validate_conflict_resolution_text,
+    PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitTarget, UnavailableGitBackend,
+    decode_utf8_optional, validate_conflict_resolution_text,
 };
 use crate::domain::{
     Branch, CommitDetails, CommitId, DiffArea, DiffTarget, HistoryMode, LogCursor, LogPage,
@@ -267,7 +267,8 @@ fn provided_trait_methods_use_unsupported_fallback_behavior() {
     assert_unsupported(repo.delete_remote_branch_with_output("origin", "main"));
     assert_unsupported(repo.commit_amend_with_output("message"));
     assert_unsupported(repo.pull_branch_with_output("origin", "main"));
-    assert_unsupported(repo.merge_ref_with_output("origin/main", MergeFastForward::Allow));
+    assert_unsupported(repo.merge_ref_with_output("origin/main"));
+    assert_unsupported(repo.merge_ref_no_ff_with_output("origin/main"));
     assert_unsupported(repo.squash_ref_with_output("origin/main"));
     assert_unsupported(repo.reset_with_output("HEAD~1", ResetMode::Mixed));
     assert_unsupported(repo.blame_file(path, None));

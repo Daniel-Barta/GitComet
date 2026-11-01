@@ -158,6 +158,11 @@ pub(super) fn commit_details_monospace_element(value: AnyElement) -> AnyElement 
         .into_any_element()
 }
 
+/// Debug id of a merge's extra parent field: git's parent number, `_2` on.
+fn extra_parent_link_id(extra_ix: usize) -> SharedString {
+    format!("commit_details_parent_link_menu_{}", extra_ix + 2).into()
+}
+
 fn commit_message_link_highlights(
     message: &str,
     theme: AppTheme,
@@ -339,9 +344,33 @@ impl DetailsPaneView {
             });
     }
 
-    /// One field per parent, in git's order. A root commit shows "—" in the
-    /// first, which links nowhere.
-    pub(super) fn sync_commit_details_parent_fields(
+    pub(super) fn sync_commit_details_parent_input(
+        &mut self,
+        parent: &str,
+        repo_id: RepoId,
+        interactive: bool,
+        theme: AppTheme,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        Self::sync_commit_details_input_value(&self.commit_details_parent_input, parent, cx);
+        self.commit_details_parent_input.update(cx, |input, cx| {
+            input.set_highlights(commit_sha_field_highlights(parent, theme), cx);
+        });
+        let parent_links = commit_sha_field_links(parent, interactive, true);
+        self.commit_details_parent_link_menu.update(cx, |menu, cx| {
+            menu.sync(
+                self.commit_details_parent_input.clone(),
+                repo_id,
+                parent_links,
+                "commit_details_parent_link_menu",
+                cx,
+            );
+        });
+    }
+
+    /// Syncs a field for each parent after the first, so a merge lists them
+    /// all. Fields a merge grew stay around, undrawn, for later commits.
+    pub(super) fn sync_commit_details_extra_parent_fields(
         &mut self,
         parents: &[CommitId],
         repo_id: RepoId,
@@ -349,29 +378,88 @@ impl DetailsPaneView {
         theme: AppTheme,
         cx: &mut gpui::Context<Self>,
     ) {
-        let count = parents.len().max(1);
-        self.ensure_commit_details_parent_fields(count, cx);
-        for (ix, field) in self.commit_details_parent_fields[..count]
-            .iter()
-            .enumerate()
-        {
-            let parent = parents.get(ix);
-            let text = parent.map_or("—", |parent| parent.as_ref());
-            Self::sync_commit_details_input_value(&field.input, text, cx);
-            field.input.update(cx, |input, cx| {
-                input.set_highlights(commit_sha_field_highlights(text, theme), cx);
-            });
-            let links = commit_sha_field_links(text, interactive && parent.is_some(), true);
-            field.link_menu.update(cx, |menu, cx| {
-                menu.sync(
-                    field.input.clone(),
-                    repo_id,
-                    links,
-                    field.link_id.clone(),
+        let extra = parents.get(1..).unwrap_or_default();
+        while self.commit_details_extra_parent_fields.len() < extra.len() {
+            let id = extra_parent_link_id(self.commit_details_extra_parent_fields.len());
+            let input = cx.new(|cx| {
+                let mut input = components::TextInput::new_inert(
+                    components::TextInputOptions::selectable(),
                     cx,
                 );
+                input.set_display_truncation(Some(components::TextTruncationProfile::Middle), cx);
+                input
+            });
+            let root_view = self.root_view.clone();
+            let link_menu = cx.new(|_cx| {
+                components::CommitLinkMenu::new(
+                    input.clone(),
+                    RepoId(0),
+                    MessageLinks::from([]),
+                    id,
+                    root_view,
+                )
+            });
+            self.commit_details_extra_parent_fields
+                .push((input, link_menu));
+        }
+        for (ix, (parent, (input, link_menu))) in extra
+            .iter()
+            .zip(&self.commit_details_extra_parent_fields)
+            .enumerate()
+        {
+            let parent = parent.as_ref();
+            Self::sync_commit_details_input_value(input, parent, cx);
+            input.update(cx, |input, cx| {
+                input.set_highlights(commit_sha_field_highlights(parent, theme), cx);
+            });
+            let links = commit_sha_field_links(parent, interactive, true);
+            link_menu.update(cx, |menu, cx| {
+                menu.sync(input.clone(), repo_id, links, extra_parent_link_id(ix), cx);
             });
         }
+    }
+
+    /// The parent SHA row: the first parent's field, then one per further
+    /// parent of a merge, in git's order.
+    pub(super) fn commit_details_parent_row(
+        &self,
+        theme: AppTheme,
+        parent_count: usize,
+        interactive: bool,
+    ) -> Div {
+        let extra = self
+            .commit_details_extra_parent_fields
+            .iter()
+            .take(parent_count.saturating_sub(1))
+            .map(|(input, link_menu)| (input, link_menu));
+        let values = std::iter::once((
+            &self.commit_details_parent_input,
+            &self.commit_details_parent_link_menu,
+        ))
+        .chain(extra)
+        .map(|(input, link_menu)| {
+            if interactive {
+                commit_details_monospace_element(link_menu.clone().into_any_element())
+            } else {
+                commit_details_monospace_value(input.clone())
+            }
+        });
+        commit_details_selectable_row(
+            theme,
+            if parent_count > 1 {
+                "Parent commit SHAs"
+            } else {
+                "Parent commit SHA"
+            },
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .min_w(px(0.0))
+                .children(values)
+                .into_any_element(),
+        )
     }
 
     /// The SHA field's text and link style, washed whole when the history find

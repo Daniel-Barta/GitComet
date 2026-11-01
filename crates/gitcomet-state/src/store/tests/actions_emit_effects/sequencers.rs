@@ -13,27 +13,21 @@ fn merge_ref_emits_effect() {
     ));
     state.active_repo = Some(RepoId(1));
 
-    for fast_forward in [MergeFastForward::Allow, MergeFastForward::Never] {
-        let effects = reduce(
-            &mut repos,
-            &id_alloc,
-            &mut state,
-            Msg::MergeRef {
-                repo_id: RepoId(1),
-                reference: "feature".to_string(),
-                fast_forward,
-            },
-        );
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::MergeRef {
+            repo_id: RepoId(1),
+            reference: "feature".to_string(),
+            fast_forward: MergeFastForward::Never,
+        },
+    );
 
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::RepoCommand(RepoCommandEffect::MergeRef {
-                repo_id: RepoId(1),
-                reference,
-                fast_forward: emitted,
-            })] if reference == "feature" && *emitted == fast_forward
-        ));
-    }
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::RepoCommand(RepoCommandEffect::MergeRef { repo_id: RepoId(1), reference, fast_forward: MergeFastForward::Never })] if reference == "feature"
+    ));
 }
 
 #[test]

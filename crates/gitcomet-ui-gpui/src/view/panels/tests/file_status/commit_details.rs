@@ -61,7 +61,7 @@ fn commit_details_metadata_fixture(
         assert_eq!(pane.commit_details_sha_input.read(app).text(), commit_sha);
         assert_eq!(pane.commit_details_date_input.read(app).text(), commit_date);
         assert_eq!(
-            pane.commit_details_parent_fields[0].input.read(app).text(),
+            pane.commit_details_parent_input.read(app).text(),
             parent_sha
         );
     });
@@ -86,7 +86,7 @@ fn commit_details_metadata_fields_are_selectable(cx: &mut gpui::TestAppContext) 
                 let input = match label {
                     "sha" => pane.commit_details_sha_input.clone(),
                     "date" => pane.commit_details_date_input.clone(),
-                    _ => pane.commit_details_parent_fields[0].input.clone(),
+                    _ => pane.commit_details_parent_input.clone(),
                 };
                 input.update(cx, |input, cx| input.select_all_text(window, cx));
             });
@@ -98,10 +98,7 @@ fn commit_details_metadata_fields_are_selectable(cx: &mut gpui::TestAppContext) 
             let actual = match label {
                 "sha" => pane.commit_details_sha_input.read(app).selected_text(),
                 "date" => pane.commit_details_date_input.read(app).selected_text(),
-                _ => pane.commit_details_parent_fields[0]
-                    .input
-                    .read(app)
-                    .selected_text(),
+                _ => pane.commit_details_parent_input.read(app).selected_text(),
             };
             assert_eq!(actual, Some(expected), "{label} field must be selectable");
         });
@@ -1393,9 +1390,14 @@ fn shown_parent_texts(
     cx.update(|_window, app| {
         let details_pane = view.read(app).details_pane.clone();
         let pane = details_pane.read(app);
-        pane.commit_details_parent_fields[..count]
-            .iter()
-            .map(|field| field.input.read(app).text().to_string())
+        std::iter::once(&pane.commit_details_parent_input)
+            .chain(
+                pane.commit_details_extra_parent_fields
+                    .iter()
+                    .map(|(input, _)| input),
+            )
+            .take(count)
+            .map(|input| input.read(app).text().to_string())
             .collect()
     })
 }
@@ -1436,15 +1438,15 @@ fn commit_details_merge_shows_every_parent_in_order(cx: &mut gpui::TestAppContex
             .read(app)
             .details_pane
             .read(app)
-            .commit_details_parent_fields[1]
-            .input
+            .commit_details_extra_parent_fields[0]
+            .0
             .clone();
         input.update(app, |input, cx| input.select_all_text(window, cx));
     });
     cx.update(|_window, app| {
         let details_pane = view.read(app).details_pane.clone();
-        let selected = details_pane.read(app).commit_details_parent_fields[1]
-            .input
+        let selected = details_pane.read(app).commit_details_extra_parent_fields[0]
+            .0
             .read(app)
             .selected_text();
         assert_eq!(selected.as_deref(), Some(SECOND_PARENT_SHA));

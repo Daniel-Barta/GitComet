@@ -6,10 +6,11 @@ use gitcomet_core::auth::{ScopedStagedGitAuth, StagedGitAuth};
 use gitcomet_core::domain::{DiffTarget, Upstream};
 use gitcomet_core::error::{Error, ErrorKind};
 use gitcomet_core::remote_url::RemoteUrlPolicy;
+use gitcomet_core::services::MergeFastForward;
 use gitcomet_core::services::{
     CommandOutput, ConflictSide, ForcePushLease, GitBackend, GitRepository, InteractiveRebaseEntry,
-    MergeFastForward, PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitContext,
-    SafePushAfterCommitTarget, SubmoduleTrustTarget, WorktreeCheckout,
+    PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitContext, SafePushAfterCommitTarget,
+    SubmoduleTrustTarget, WorktreeCheckout,
 };
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -1375,7 +1376,10 @@ fn schedule_merge_ref(
             reference: command_reference,
             fast_forward,
         },
-        move |repo| repo.merge_ref_with_output(&reference, fast_forward),
+        move |repo| match fast_forward {
+            MergeFastForward::Allow => repo.merge_ref_with_output(&reference),
+            MergeFastForward::Never => repo.merge_ref_no_ff_with_output(&reference),
+        },
     );
 }
 

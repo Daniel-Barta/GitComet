@@ -10,7 +10,7 @@ use gitcomet_core::domain::{CommitId, Remote, RemoteBranch, Upstream};
 use gitcomet_core::error::{Error, ErrorKind, GitFailure, GitFailureId};
 use gitcomet_core::remote_url::{RemoteUrlPolicy, validate_remote_url_with_policy};
 use gitcomet_core::services::{
-    CancellationToken, CommandOutput, ForcePushLease, MergeFastForward, RemoteUrlKind, Result,
+    CancellationToken, CommandOutput, ForcePushLease, RemoteUrlKind, Result,
     SafePushAfterCommitContext, SafePushAfterCommitDecision, SafePushAfterCommitTarget,
 };
 use gitcomet_core::text_utils::redact_url_userinfo;
@@ -1918,17 +1918,14 @@ impl GixRepo {
         self.push_head_to_branch_with_oid_lease_with_output_impl(lease)
     }
 
+    /// `ff_flag` is `--ff` or `--no-ff`.
     pub(super) fn merge_ref_with_output_impl(
         &self,
         reference: &str,
-        fast_forward: MergeFastForward,
+        ff_flag: &'static str,
     ) -> Result<CommandOutput> {
         validate_ref_like_arg(reference, "reference")?;
 
-        let ff_flag = match fast_forward {
-            MergeFastForward::Allow => "--ff",
-            MergeFastForward::Never => "--no-ff",
-        };
         let command_str = format!("git merge {ff_flag} --no-edit {reference}");
         let mut cmd = self.git_workdir_cmd();
         cmd.args(NO_COLOR_CONFIG)

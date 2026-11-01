@@ -3,10 +3,10 @@ use crate::model::RepoId;
 use gitcomet_core::auth::StagedGitAuth;
 use gitcomet_core::domain::*;
 use gitcomet_core::remote_url::RemoteUrlPolicy;
+use gitcomet_core::services::MergeFastForward;
 use gitcomet_core::services::{
-    ConflictSide, ForcePushLease, InteractiveRebaseEntry, MergeFastForward, PullMode,
-    RemoteUrlKind, ResetMode, SafePushAfterCommitContext, SafePushAfterCommitTarget,
-    SubmoduleTrustTarget, WorktreeCheckout,
+    ConflictSide, ForcePushLease, InteractiveRebaseEntry, PullMode, RemoteUrlKind, ResetMode,
+    SafePushAfterCommitContext, SafePushAfterCommitTarget, SubmoduleTrustTarget, WorktreeCheckout,
 };
 use std::path::PathBuf;
 
