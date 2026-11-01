@@ -1,5 +1,19 @@
 # Vendored dependencies
 
+## Razor views and components
+
+`tree-sitter-razor-modern/` vendors the MIT grammar at upstream revision
+[`0f2ac3c7`](https://github.com/alfpricot/tree-sitter-razor-modern/commit/0f2ac3c7eb05b3cf41ff2370c42d8d2d6f2b4319),
+rebased on GitComet's existing C# 14 grammar and scanner. Its local boundary
+patches, Unicode table derivation, source-range injection contract, licensing,
+and regeneration commands are recorded in
+[the grammar README](tree-sitter-razor-modern/README.md). The generated parser
+uses ABI 15 and the existing threshold-128 table retune with CLI 0.26.5.
+
+The shared HTML scanner also accepts `.` inside tag names so qualified Blazor
+components retain one complete tag-name token. Its Rust regression checks both
+opening and closing qualified names; this does not add Razor syntax to HTML.
+
 ## Objective-C blocks
 
 `block/` contains the published MIT-licensed `block` 0.1.6 source from
@@ -67,10 +81,12 @@ pristine baseline, built by this recipe:
   `vendored_parsers/highlights/*.scm`; delete everything else.
 - Follow symlinks to their target files, and store `src/main.rs` as `src/lib.rs`.
 
-Unlike the other vendored crates it is a workspace member: that lets its grammars
+Unlike most vendored crates it is a workspace member (so is
+`mermaid-rs-renderer/`; see its `GITCOMET_PATCHES.md`): that lets its grammars
 use `workspace = true`, so each language resolves to the one grammar crate
-GitComet links. Two crates defining the same `tree_sitter_<lang>` symbol both
-get built and the linker silently keeps one, so `scripts/ci/grammar_symbols.py`
+GitComet links. All other dependencies also inherit their versions from the
+root workspace manifest. Two crates defining the same `tree_sitter_<lang>` symbol
+both get built and the linker silently keeps one, so `scripts/ci/grammar_symbols.py`
 fails CI when that happens. Its manifest pins edition 2021, which keeps `cargo fmt`
 from rewriting upstream files, and forbids `unsafe` code.
 

@@ -59,8 +59,9 @@ fn inline_submodule_selected_diff_load_plan(target: &DiffTarget) -> SelectedDiff
 
     SelectedDiffLoadPlan {
         load_patch_diff: supports_file,
-        load_file_text: supports_file && (!preview.wants_image || preview.is_svg),
+        load_file_text: supports_file && preview.reads_text(),
         preview_text_side: None,
+        one_sided_side: None,
         load_submodule_summary: false,
         load_file_image: supports_file && preview.wants_image,
     }
@@ -549,6 +550,28 @@ pub(super) fn fill_select_diff_inline(
     mode: ContentViewMode,
     effects: &mut SelectDiffEffects,
 ) {
+    let working_tree = match &target {
+        DiffTarget::WorkingTree { worktree: None, .. }
+        | DiffTarget::CommitRange {
+            to_commit_id: None, ..
+        } => Some(repo_id),
+        DiffTarget::WorkingTree {
+            worktree: Some(path),
+            ..
+        } => state
+            .repos
+            .iter()
+            .find(|repo| &repo.spec.workdir == path)
+            .map(|repo| repo.id),
+        DiffTarget::Commit { .. }
+        | DiffTarget::CommitRange {
+            to_commit_id: Some(_),
+            ..
+        } => None,
+    };
+    if working_tree.is_some_and(|repo_id| super::refuse_bare_worktree_action(state, repo_id)) {
+        return;
+    }
     // Classify before planning, not at the `SelectDiff` message: every route
     // that puts a working-tree path on screen — plain selection, the file
     // content/editor views, viewer and global back/forward — lands here, and
@@ -571,11 +594,7 @@ pub(super) fn fill_select_diff_inline(
     if !content_preview && let Some(conflict_target) = selected_conflict_target(repo_state, &target)
     {
         repo_state.set_diff_target(Some(target.clone()));
-        repo_state.diff_state.diff = Loadable::NotLoaded;
-        repo_state.diff_state.diff_file = Loadable::NotLoaded;
-        repo_state.diff_state.diff_preview_text_file = Loadable::NotLoaded;
-        repo_state.diff_state.submodule_summary = Loadable::NotLoaded;
-        repo_state.diff_state.diff_file_image = Loadable::NotLoaded;
+        repo_state.diff_state.clear_loads();
         repo_state.bump_diff_state_rev();
         let conflict_effects = match conflict_target {
             SelectedConflictTarget::Current => start_current_conflict_target_reload(repo_state),
@@ -608,6 +627,18 @@ pub(super) fn fill_select_diff_inline(
         load_submodule_summary: load_plan.load_submodule_summary,
         load_file_image: load_plan.load_file_image,
     });
+    // Without an extension only the bytes say whether a file is an image.
+    // The probe's answer is kept only when they do (`diff_file_image_loaded`).
+    if let Some(target) = &repo_state.diff_state.diff_target
+        && !load_plan.load_file_image
+        && !load_plan.load_submodule_summary
+        && super::util::probes_image_content(target)
+    {
+        effects.push(Effect::LoadDiffFileImage {
+            repo_id,
+            target: target.clone(),
+        });
+    }
 }
 
 pub(super) fn select_conflict_diff(
@@ -626,11 +657,7 @@ pub(super) fn select_conflict_diff(
 
     let target = DiffTarget::working_tree(path.clone(), DiffArea::Unstaged);
     repo_state.set_diff_target(Some(target));
-    repo_state.diff_state.diff = Loadable::NotLoaded;
-    repo_state.diff_state.diff_file = Loadable::NotLoaded;
-    repo_state.diff_state.diff_preview_text_file = Loadable::NotLoaded;
-    repo_state.diff_state.submodule_summary = Loadable::NotLoaded;
-    repo_state.diff_state.diff_file_image = Loadable::NotLoaded;
+    repo_state.diff_state.clear_loads();
     repo_state.bump_diff_state_rev();
 
     let mut effects = start_conflict_target_reload_with_mode(
@@ -786,11 +813,7 @@ pub(super) fn clear_diff_selection(state: &mut AppState, repo_id: RepoId) -> Vec
     repo_state.diff_state.edit_return_view = None;
 
     repo_state.set_diff_target(None);
-    repo_state.diff_state.diff = Loadable::NotLoaded;
-    repo_state.diff_state.diff_file = Loadable::NotLoaded;
-    repo_state.diff_state.diff_preview_text_file = Loadable::NotLoaded;
-    repo_state.diff_state.submodule_summary = Loadable::NotLoaded;
-    repo_state.diff_state.diff_file_image = Loadable::NotLoaded;
+    repo_state.diff_state.clear_loads();
     repo_state.bump_diff_state_rev();
     Vec::new()
 }
@@ -1156,7 +1179,16 @@ pub(super) fn diff_file_image_loaded(
         }
         let current_plan = selected_diff_load_plan(inputs, repo_state, &target);
         if !current_plan.load_file_image {
-            return Vec::new();
+            // The probe of a file whose name does not say it is an image.
+            let shows_image = super::util::probes_image_content(&target)
+                && matches!(&result, Ok(Some(image)) if [image.old.as_deref(), image.new.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(super::util::has_image_signature));
+            if !shows_image {
+                return Vec::new();
+            }
+            repo_state.diff_state.content_image_target = Some(target.clone());
         }
         let content_preview = repo_state.diff_state.content_preview;
         repo_state.diff_state.diff_file_rev = repo_state.diff_state.diff_file_rev.wrapping_add(1);

@@ -48,14 +48,37 @@ pub(in crate::view) enum AddRepoMenuAction {
     Initialize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub(in crate::view) enum HistoryMenuRef {
     Branch(BranchMenuTarget),
     Tag(String),
 }
 
+/// Which of the commit's refs its menu lists.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(in crate::view) enum CommitMenuRefs {
+    All,
+    /// The one ref picked from the row's ref list.
+    Only(HistoryMenuRef),
+    /// The detached HEAD picked from the row's ref list: no ref of its own.
+    Hidden,
+}
+
+impl CommitMenuRefs {
+    pub(in crate::view) fn admits(&self, target: &HistoryMenuRef) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(only) => only == target,
+            Self::Hidden => false,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(in crate::view) enum ContextMenuAction {
+    PreviewDisableBareMode {
+        repo_id: RepoId,
+    },
     Explorer {
         repo_id: RepoId,
         path: std::path::PathBuf,
@@ -201,6 +224,15 @@ pub(in crate::view) enum ContextMenuAction {
         path: String,
         group_label: String,
     },
+    /// Focus the history on every branch in a group, or stop focusing them.
+    /// Like the delete above, the members are resolved on activation.
+    SetBranchGroupFocus {
+        repo_id: RepoId,
+        section: BranchSection,
+        remote: Option<String>,
+        path: String,
+        focused: bool,
+    },
     /// Open or close a folder together with every directory beneath it.
     SetFileBrowserDirExpandedRecursive {
         repo_id: RepoId,
@@ -237,6 +269,11 @@ pub(in crate::view) enum ContextMenuAction {
     },
     OpenRepo {
         path: std::path::PathBuf,
+    },
+    /// Opens the Add-worktree dialog with these fields filled in.
+    OpenWorktreeAddPrompt {
+        repo_id: RepoId,
+        prefill: WorktreeAddPrefill,
     },
     ActivateRepo {
         repo_id: RepoId,
@@ -372,6 +409,16 @@ pub(in crate::view) enum ContextMenuAction {
         repo_id: RepoId,
         scope: gitcomet_core::domain::LogScope,
     },
+    /// Adds a ref to the history focus set, or removes it when already there.
+    ToggleHistoryFocus {
+        repo_id: RepoId,
+        target: gitcomet_core::domain::HistoryFocus,
+    },
+    /// Replaces the history focus set outright; an empty set clears the focus.
+    SetHistoryFocus {
+        repo_id: RepoId,
+        focus: gitcomet_core::domain::HistoryFocusSet,
+    },
     SetCommitFileSort {
         list: crate::view::rows::FileListId,
         sort: crate::view::rows::CommitFileSort,
@@ -403,6 +450,11 @@ pub(in crate::view) enum ContextMenuAction {
         repo_id: RepoId,
         hidden: Option<bool>,
         ignored: Option<bool>,
+    },
+    SetRemoteHistoryVisibility {
+        repo_id: RepoId,
+        remote: String,
+        hidden: bool,
     },
     SetChangeTrackingView {
         view: ChangeTrackingView,
@@ -463,6 +515,10 @@ pub(in crate::view) enum ContextMenuAction {
     },
     FetchAll {
         repo_id: RepoId,
+    },
+    FetchRemote {
+        repo_id: RepoId,
+        remote: String,
     },
     PruneMergedBranches {
         repo_id: RepoId,
@@ -772,8 +828,6 @@ impl ContextMenuModel {
     }
 }
 
-// HistoryColResizeDragGhost moved to view/mod.rs for accessibility from panes::HistoryView.
-
 mod action_bar;
 pub(in crate::view) mod bar_items;
 mod bars;
@@ -787,6 +841,9 @@ mod repo_tabs_bar;
 pub(in crate::view) use action_bar::action_bar_breakpoints;
 pub(super) use action_bar::{ActionBarView, action_bar_density, action_bar_height};
 pub(super) use bottom_status_bar::{BottomStatusBarView, bottom_status_bar_height};
+pub(in crate::view) use layout::commit_reword_submittable;
+#[cfg(test)]
+pub(in crate::view) use layout::{commit_reword_availability, commit_reword_blocker};
 pub(super) use popover::{PopoverHost, PopoverHostInit};
 #[cfg(feature = "benchmarks")]
 pub(in crate::view) use popover::{benchmark_branch_checkout_rows, benchmark_workspace_rows};

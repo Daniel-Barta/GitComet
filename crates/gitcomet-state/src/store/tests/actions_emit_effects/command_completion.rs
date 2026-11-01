@@ -864,7 +864,10 @@ fn additional_routing_messages_emit_effects_and_update_counters() {
         Msg::AddWorktree {
             repo_id,
             path: PathBuf::from("/tmp/worktree"),
-            reference: Some("main".to_string()),
+            checkout: gitcomet_core::services::WorktreeCheckout::Existing {
+                reference: "main".to_string(),
+            },
+            open_after: false,
         },
     );
     assert!(matches!(
@@ -883,13 +886,15 @@ fn additional_routing_messages_emit_effects_and_update_counters() {
         Msg::RemoveWorktree {
             repo_id,
             path: PathBuf::from("nested/worktree"),
+            delete_branch: None,
         },
     );
     assert!(matches!(
         effects.as_slice(),
         [Effect::RepoCommand(RepoCommandEffect::RemoveWorktree {
             repo_id: RepoId(1),
-            path
+            path,
+            ..
         })] if path == &PathBuf::from("/tmp/repo/nested/worktree")
     ));
     assert_eq!(state.repos[0].worktrees_in_flight, 2);
@@ -1216,13 +1221,18 @@ fn repo_command_finished_error_summaries_cover_additional_labels() {
         (
             RepoCommandKind::AddWorktree {
                 path: PathBuf::from("/tmp/worktree"),
-                reference: None,
+                checkout: gitcomet_core::services::WorktreeCheckout::NewBranch {
+                    name: "wt".to_string(),
+                    start: None,
+                },
+                open_after: false,
             },
             "Worktree",
         ),
         (
             RepoCommandKind::RemoveWorktree {
                 path: PathBuf::from("/tmp/worktree"),
+                delete_branch: None,
             },
             "Worktree",
         ),
@@ -1332,20 +1342,53 @@ fn repo_command_finished_success_summaries_cover_additional_commands() {
         (
             RepoCommandKind::AddWorktree {
                 path: PathBuf::from("../wt"),
-                reference: Some("main".to_string()),
+                checkout: gitcomet_core::services::WorktreeCheckout::Existing {
+                    reference: "main".to_string(),
+                },
+                open_after: false,
             },
             "Worktree added → ../wt (main)",
         ),
         (
             RepoCommandKind::AddWorktree {
                 path: PathBuf::from("../wt"),
-                reference: None,
+                checkout: gitcomet_core::services::WorktreeCheckout::NewBranch {
+                    name: "wt".to_string(),
+                    start: None,
+                },
+                open_after: false,
             },
-            "Worktree added → ../wt",
+            "Worktree added → ../wt (new branch wt)",
+        ),
+        (
+            RepoCommandKind::AddWorktree {
+                path: PathBuf::from("../wt"),
+                checkout: gitcomet_core::services::WorktreeCheckout::NewBranch {
+                    name: "wt".to_string(),
+                    start: Some("origin/main".to_string()),
+                },
+                open_after: false,
+            },
+            "Worktree added → ../wt (new branch wt from origin/main)",
+        ),
+        (
+            RepoCommandKind::AddWorktree {
+                path: PathBuf::from("../wt"),
+                checkout: gitcomet_core::services::WorktreeCheckout::TrackRemote {
+                    name: "x".to_string(),
+                    upstream: gitcomet_core::domain::Upstream {
+                        remote: "origin".to_string(),
+                        branch: "x".to_string(),
+                    },
+                },
+                open_after: false,
+            },
+            "Worktree added → ../wt (new branch x tracking origin/x)",
         ),
         (
             RepoCommandKind::RemoveWorktree {
                 path: PathBuf::from("../wt"),
+                delete_branch: None,
             },
             "Worktree removed → ../wt",
         ),

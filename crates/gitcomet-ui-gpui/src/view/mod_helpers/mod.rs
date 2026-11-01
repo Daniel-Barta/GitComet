@@ -25,12 +25,19 @@ pub(in crate::view) enum PushRequest {
     NotReady,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::view) enum PullRequest {
-    Pull,
-    NoRemotes,
-    NotReady,
+impl PushRequest {
+    /// Why Push cannot start, or `None` when it can.
+    pub(in crate::view) fn unavailable_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::NotReady => Some(REPOSITORY_LOADING_REASON),
+            Self::NoRemotes => Some("Add a remote to push to first"),
+            Self::Push | Self::SetUpstream { .. } => None,
+        }
+    }
 }
+
+/// Why an action waits on repository data that has not loaded.
+pub(in crate::view) const REPOSITORY_LOADING_REASON: &str = "The repository is still loading";
 
 /// What opening the repository's remote in a web browser should do.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,7 +54,7 @@ impl RemoteWebRequest {
     /// Why nothing can be opened, for a disabled palette or menu row.
     pub(in crate::view) fn unavailable_reason(&self) -> Option<&'static str> {
         match self {
-            Self::NotReady => Some("The repository is still loading"),
+            Self::NotReady => Some(REPOSITORY_LOADING_REASON),
             Self::NoRemotes => Some("Add a remote first"),
             Self::NoWebPage => Some("No remote URL points to a web page"),
             Self::Open(_) | Self::Choose(_) => None,
@@ -69,19 +76,53 @@ pub(in crate::view) fn head_is_detached(repo: &RepoState) -> bool {
     matches!(&repo.head_branch, Loadable::Ready(head) if head.is_empty() || head == "HEAD")
 }
 
+/// The checked-out branch's upstream: a live tracking branch, or one set by
+/// "Create new" before its first push. A detached HEAD has none.
+pub(in crate::view) fn head_branch_upstream<'a>(
+    head_branch: &Loadable<String>,
+    branches: &'a Loadable<Arc<Vec<Branch>>>,
+) -> Option<&'a gitcomet_core::domain::Upstream> {
+    let head = head_branch.ready()?;
+    branches
+        .ready()?
+        .iter()
+        .find(|branch| branch.name == *head)
+        .and_then(|branch| branch.upstream.as_ref())
+}
+
+/// The lease a force push confirmed now holds: a pending published-amend
+/// lease, else the upstream tip and HEAD this window shows. Git's implicit
+/// lease would accept whatever tip a background fetch wrote since.
+pub(in crate::view) fn force_push_lease(
+    repo: &RepoState,
+) -> Option<gitcomet_core::services::ForcePushLease> {
+    if let Some(lease) = &repo.pending.force_push_lease {
+        return Some(lease.clone());
+    }
+    let local_branch = repo.head_branch.ready()?;
+    let branch = repo
+        .branches
+        .ready()?
+        .iter()
+        .find(|branch| branch.name == *local_branch)?;
+    let upstream = branch.upstream.as_ref()?;
+    let remote_tip = repo.remote_branches.ready()?.iter().find(|candidate| {
+        candidate.remote == upstream.remote && candidate.name == upstream.branch
+    })?;
+    Some(gitcomet_core::services::ForcePushLease {
+        remote: upstream.remote.clone(),
+        branch: upstream.branch.clone(),
+        expected: remote_tip.target.clone(),
+        local_branch: local_branch.clone(),
+        local_head: branch.target.clone(),
+    })
+}
+
 /// Whether the checked-out branch has a confirmed live remote-tracking
 /// upstream. This remains false until the remote-branch list is loaded, and a
 /// detached HEAD carries no branch to hold one.
 pub(in crate::view) fn head_branch_has_live_upstream(repo: &RepoState) -> bool {
-    let (Loadable::Ready(head), Loadable::Ready(branches)) = (&repo.head_branch, &repo.branches)
-    else {
-        return false;
-    };
-    let Some(upstream) = branches
-        .iter()
-        .find(|branch| branch.name == *head)
-        .and_then(|branch| branch.upstream.as_ref())
-    else {
+    let Some(upstream) = head_branch_upstream(&repo.head_branch, &repo.branches) else {
         return false;
     };
     let Some(remote_branches) = repo.remote_branches.ready() else {
@@ -92,51 +133,32 @@ pub(in crate::view) fn head_branch_has_live_upstream(repo: &RepoState) -> bool {
         .any(|candidate| candidate.remote == upstream.remote && candidate.name == upstream.branch)
 }
 
-/// The toolbar and menu can pull through annex on adjusted branches, or
-/// through Git when the current branch has a live remote-tracking upstream.
-pub(in crate::view) fn pull_enabled(
+/// Why Pull cannot run, or `None` when it can. Pull fetches the checked-out
+/// branch's upstream, so that branch must exist on its remote; otherwise Git
+/// fails with "couldn't find remote ref". git-annex pulls instead on adjusted
+/// branches and in bare annex repositories.
+pub(in crate::view) fn pull_unavailable_reason(
     repo: &RepoState,
     settings: &gitcomet_state::model::LargeFileSettings,
-) -> bool {
-    repo.annex_takes_over_pull_push(settings) || head_branch_has_live_upstream(repo)
-}
-
-/// Decide whether Pull can run. A configured upstream is actionable only when
-/// its exact remote-tracking ref exists; a future upstream configured by
-/// "Create new" must be pushed before Pull is offered. For a branch with no
-/// configured upstream, the backend can still use the preferred remote, while
-/// detached HEAD falls back to Git's own diagnostics.
-pub(in crate::view) fn pull_request(
-    repo: &RepoState,
-    settings: &gitcomet_state::model::LargeFileSettings,
-) -> PullRequest {
-    if pull_enabled(repo, settings) {
-        return PullRequest::Pull;
-    }
-    let Loadable::Ready(head) = &repo.head_branch else {
-        return PullRequest::NotReady;
-    };
-    if head.is_empty() || head == "HEAD" {
-        return PullRequest::Pull;
-    }
-    let Loadable::Ready(branches) = &repo.branches else {
-        return PullRequest::NotReady;
-    };
-    if branches
-        .iter()
-        .find(|branch| branch.name == *head)
-        .is_some_and(|branch| branch.upstream.is_some())
+) -> Option<&'static str> {
+    if repo.annex_takes_over_pull_push(settings) {
+        None
+    } else if repo.is_bare() {
+        Some(gitcomet_core::domain::WORKING_TREE_REQUIRED_MESSAGE)
+    } else if head_is_detached(repo) {
+        Some("HEAD is detached — check out a branch first")
+    } else if repo.head_branch.ready().is_none()
+        || repo.branches.ready().is_none()
+        || repo.remote_branches.ready().is_none()
     {
-        return PullRequest::NotReady;
+        Some(REPOSITORY_LOADING_REASON)
+    } else if head_branch_upstream(&repo.head_branch, &repo.branches).is_none() {
+        Some("Set an upstream for this branch first")
+    } else if !head_branch_has_live_upstream(repo) {
+        Some("Push this branch to its upstream first")
+    } else {
+        None
     }
-
-    let Loadable::Ready(remotes) = &repo.remotes else {
-        return PullRequest::NotReady;
-    };
-    if remotes.is_empty() {
-        return PullRequest::NoRemotes;
-    }
-    PullRequest::Pull
 }
 
 /// Whether the repository is part-way through a merge.
@@ -298,7 +320,7 @@ pub(super) struct HistoryColResizeState {
     pub(super) visible_columns: (bool, bool, bool),
 }
 
-pub(super) struct ResizeDragGhost;
+struct ResizeDragGhost;
 
 impl Render for ResizeDragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
@@ -306,7 +328,21 @@ impl Render for ResizeDragGhost {
     }
 }
 
-pub(super) use ResizeDragGhost as HistoryColResizeDragGhost;
+pub(in crate::view) trait ResizeDividerDrag:
+    gpui::StatefulInteractiveElement + Sized
+{
+    /// Starts a divider drag with an invisible preview. The move handler must
+    /// notify the views it resizes: gpui's default redraws every cached view
+    /// on each pointer move, including the panes the divider does not move.
+    fn on_resize_drag<T: 'static>(self, handle: T) -> Self {
+        self.on_drag(handle, |_handle, _offset, _window, cx| {
+            gpui::AppContext::new(cx, |_cx| ResizeDragGhost)
+        })
+        .drag_move_refresh(gpui::DragMoveRefresh::Preview)
+    }
+}
+
+impl<E: gpui::StatefulInteractiveElement> ResizeDividerDrag for E {}
 
 pub(super) fn should_hide_unified_diff_header_line(line: &AnnotatedDiffLine) -> bool {
     matches!(line.kind, gitcomet_core::domain::DiffLineKind::Header)
@@ -612,8 +648,6 @@ impl PaneResizeState {
     }
 }
 
-pub(super) use ResizeDragGhost as PaneResizeDragGhost;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DiffSplitResizeHandle {
     Divider,
@@ -626,8 +660,6 @@ pub(super) struct DiffSplitResizeState {
     pub(super) start_ratio: f32,
 }
 
-pub(super) use ResizeDragGhost as DiffSplitResizeDragGhost;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::view) enum AnnotateResizeHandle {
     Divider,
@@ -639,8 +671,6 @@ pub(in crate::view) struct AnnotateResizeState {
     pub(in crate::view) start_width: f32,
 }
 
-pub(in crate::view) use ResizeDragGhost as AnnotateResizeDragGhost;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ConflictVSplitResizeHandle {
     Divider,
@@ -651,8 +681,6 @@ pub(super) struct ConflictVSplitResizeState {
     pub(super) start_y: Pixels,
     pub(super) start_ratio: f32,
 }
-
-pub(super) use ResizeDragGhost as ConflictVSplitResizeDragGhost;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum StatusSectionResizeHandle {
@@ -667,9 +695,6 @@ pub(super) struct StatusSectionResizeState {
     pub(super) start_height: Pixels,
 }
 
-#[allow(unused_imports)]
-pub(super) use ResizeDragGhost as StatusSectionResizeDragGhost;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ConflictHSplitResizeHandle {
     First,
@@ -683,8 +708,6 @@ pub(super) struct ConflictHSplitResizeState {
     pub(super) start_ratios: [f32; 2],
 }
 
-pub(super) use ResizeDragGhost as ConflictHSplitResizeDragGhost;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ConflictDiffSplitResizeHandle {
     Divider,
@@ -694,31 +717,6 @@ pub(super) enum ConflictDiffSplitResizeHandle {
 pub(super) struct ConflictDiffSplitResizeState {
     pub(super) start_x: Pixels,
     pub(super) start_ratio: f32,
-}
-
-pub(super) use ResizeDragGhost as ConflictDiffSplitResizeDragGhost;
-
-#[cfg(test)]
-mod resize_drag_ghost_tests {
-    use super::{
-        ConflictDiffSplitResizeDragGhost, ConflictHSplitResizeDragGhost,
-        ConflictVSplitResizeDragGhost, DiffSplitResizeDragGhost, HistoryColResizeDragGhost,
-        PaneResizeDragGhost, ResizeDragGhost, StatusSectionResizeDragGhost,
-    };
-    use std::any::TypeId;
-
-    #[test]
-    fn all_resize_drag_ghost_aliases_use_shared_type() {
-        let shared = TypeId::of::<ResizeDragGhost>();
-
-        assert_eq!(TypeId::of::<HistoryColResizeDragGhost>(), shared);
-        assert_eq!(TypeId::of::<PaneResizeDragGhost>(), shared);
-        assert_eq!(TypeId::of::<DiffSplitResizeDragGhost>(), shared);
-        assert_eq!(TypeId::of::<ConflictVSplitResizeDragGhost>(), shared);
-        assert_eq!(TypeId::of::<StatusSectionResizeDragGhost>(), shared);
-        assert_eq!(TypeId::of::<ConflictHSplitResizeDragGhost>(), shared);
-        assert_eq!(TypeId::of::<ConflictDiffSplitResizeDragGhost>(), shared);
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -1149,10 +1147,11 @@ pub struct GitCometView {
     pub(super) pending_quit_other_views: Vec<gpui::WeakEntity<GitCometView>>,
     pub(super) pending_pull_reconcile_prompt: Option<RepoId>,
     pub(super) pending_branch_exists_prompt: Option<BranchExistsPromptState>,
-    pub(super) pending_force_delete_branch_prompt: Option<(RepoId, String)>,
+    pub(super) pending_force_delete_branch_prompt:
+        Option<gitcomet_state::model::ForceDeleteBranchPrompt>,
     pub(super) pending_force_delete_branch_centered: bool,
     pub(super) pending_force_remove_worktree_prompt:
-        Option<(RepoId, std::path::PathBuf, Option<String>)>,
+        Option<gitcomet_state::model::ForceRemoveWorktreePrompt>,
     pub(super) pending_submodule_trust_prompt:
         Option<gitcomet_state::model::SubmoduleTrustPromptState>,
     pub(super) pending_submodule_trust_check:
@@ -1169,7 +1168,6 @@ pub struct GitCometView {
     /// suppression above, this remains set across operations until Activity is
     /// opened again and closed with its X button.
     pub(super) minimized_hook_activity_repos: FxHashSet<RepoId>,
-    pub(super) pending_worktree_branch_removals: FxHashMap<(RepoId, std::path::PathBuf), String>,
     pub(super) startup_crash_report: Option<StartupCrashReport>,
     #[cfg(target_os = "macos")]
     pub(super) recent_repos_menu_fingerprint: Vec<std::path::PathBuf>,
@@ -1185,6 +1183,11 @@ pub struct GitCometView {
     /// Where the keyboard was before a prompt focused itself (`Some(None)`:
     /// nothing was focused), returned when the prompt goes away.
     pub(super) auth_prompt_focus_return: Option<Option<FocusHandle>>,
+    /// The special remote whose location the user said is not theirs: its
+    /// banner offers removing it.
+    pub(super) annex_remote_rejected: Option<(RepoId, String)>,
+    /// Special remotes put off with Later, by configuration, for this session.
+    pub(super) annex_remote_later: rustc_hash::FxHashSet<(RepoId, String, String)>,
     pub(super) active_context_menu_invoker: Option<SharedString>,
 }
 

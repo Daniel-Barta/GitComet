@@ -139,7 +139,12 @@ impl GitCometView {
             .is_some_and(|repo_id| self.terminal_sessions.contains_key(&repo_id))
     }
 
-    fn sync_terminal_indicator_views(&mut self, cx: &mut gpui::Context<Self>) {
+    /// Tells the repository tabs, the action bar and extensions which
+    /// terminals are open.
+    fn terminal_sessions_changed(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(extension_window) = &self.extension_window {
+            extension_window.set_terminals(self.open_terminals());
+        }
         let repo_ids = self
             .terminal_sessions
             .keys()
@@ -157,8 +162,29 @@ impl GitCometView {
         });
     }
 
+    /// Each repository's open terminal tabs, as extensions see them.
+    fn open_terminals(&self) -> FxHashMap<RepoId, Vec<super::extension_host::OpenTerminal>> {
+        self.terminal_sessions
+            .iter()
+            .map(|(repo_id, session)| {
+                let tabs = session
+                    .instances
+                    .iter()
+                    .map(|instance| super::extension_host::OpenTerminal {
+                        id: gitcomet_extension_api::TerminalId::new(instance.session_seq),
+                        shell_pid: instance.child_pid,
+                    })
+                    .collect();
+                (*repo_id, tabs)
+            })
+            .collect()
+    }
+
     pub(in crate::view) fn sync_terminal_button_target(&self, cx: &mut gpui::Context<Self>) {
         let target = self.terminal_preferences.terminal_button_target;
+        if let Some(extension_window) = &self.extension_window {
+            extension_window.set_terminal_target(target);
+        }
         let action_bar = self.action_bar.clone();
         cx.defer(move |cx| {
             action_bar.update(cx, |bar, cx| bar.set_terminal_button_target(target, cx));
@@ -190,7 +216,7 @@ impl GitCometView {
                 }
             }
         }
-        self.sync_terminal_indicator_views(cx);
+        self.terminal_sessions_changed(cx);
         cx.notify();
     }
 
@@ -223,7 +249,7 @@ impl GitCometView {
         );
 
         self.spawn_terminal_event_task(repo_id, session_seq, cx);
-        self.sync_terminal_indicator_views(cx);
+        self.terminal_sessions_changed(cx);
         self.focus_terminal_view(repo_id, window, cx);
         cx.notify();
     }
@@ -253,7 +279,7 @@ impl GitCometView {
         session.active_index = session.instances.len() - 1;
 
         self.spawn_terminal_event_task(repo_id, session_seq, cx);
-        self.sync_terminal_indicator_views(cx);
+        self.terminal_sessions_changed(cx);
         self.focus_terminal_view(repo_id, window, cx);
         cx.notify();
     }
@@ -308,7 +334,129 @@ impl GitCometView {
             viewport,
             session_seq,
             title: terminal_tab_default_title(),
+            pending_input: None,
         })
+    }
+
+    /// Opens a terminal at `cwd` for an extension, as the terminal button
+    /// would, once `cwd` is known to be a folder: a shell started in one that
+    /// is not would open in GitComet's own instead. The folder is looked at
+    /// off this thread, since a stat on an unreachable share never returns.
+    pub(in crate::view) fn open_terminal_at(
+        &mut self,
+        repository: &gitcomet_extension_api::RepositoryHandle,
+        cwd: PathBuf,
+        command: Option<String>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let looked_at = cwd.clone();
+        let is_folder = cx
+            .background_executor()
+            .spawn(async move { looked_at.is_dir() });
+        let window_handle = self.window_handle;
+        let repository = repository.clone();
+        cx.spawn(
+            async move |view: WeakEntity<GitCometView>, cx: &mut gpui::AsyncApp| {
+                let is_folder = is_folder.await;
+                let _ = window_handle.update(cx, |_, window, cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        if is_folder {
+                            this.open_terminal_in_folder(&repository, cwd, command, window, cx);
+                        } else {
+                            this.push_toast(
+                                components::ToastKind::Error,
+                                format!(
+                                    "Failed to open a terminal: {} is not a folder",
+                                    cwd.display()
+                                ),
+                                cx,
+                            );
+                        }
+                    });
+                });
+            },
+        )
+        .detach();
+    }
+
+    /// Opens the terminal at `cwd`, a folder. Embedded, `command` is typed
+    /// with Enter once the new tab first prints. The host refuses a command
+    /// for an external terminal; if the user's button turned external since,
+    /// the terminal opens and says the command was not run. A repository that
+    /// closed is left alone.
+    fn open_terminal_in_folder(
+        &mut self,
+        repository: &gitcomet_extension_api::RepositoryHandle,
+        cwd: PathBuf,
+        command: Option<String>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(repo_id) = self.repository_state(repository).map(|repo| repo.id) else {
+            return;
+        };
+        match self.terminal_preferences.terminal_button_target {
+            TerminalButtonTarget::External => {
+                self.open_external_terminal_at(repo_id, cwd, cx);
+                if command.is_some() {
+                    self.push_toast(
+                        components::ToastKind::Warning,
+                        format!(
+                            "The terminal opened outside {}, where the command could not be typed",
+                            crate::view::product_name()
+                        ),
+                        cx,
+                    );
+                }
+            }
+            TerminalButtonTarget::Embedded => {
+                let Some(mut instance) = self.spawn_terminal_instance(&cwd, cx) else {
+                    return;
+                };
+                instance.pending_input = command.map(|command| typed_line(&command));
+                self.add_terminal_tab(repo_id, instance, window, cx);
+            }
+        }
+    }
+
+    /// Adds a spawned `instance` to `repo_id`'s terminal as its selected tab,
+    /// starting the terminal when it has none, and shows it. The terminal
+    /// keeps the repository's workdir for its own new tabs.
+    pub(in crate::view) fn add_terminal_tab(
+        &mut self,
+        repo_id: RepoId,
+        instance: TerminalInstance,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(workdir) = self
+            .state
+            .repos
+            .iter()
+            .find(|repo| repo.id == repo_id)
+            .map(|repo| repo.spec.workdir.clone())
+        else {
+            shutdown_terminal_instance(&instance, true);
+            return;
+        };
+        let session_seq = instance.session_seq;
+        let session =
+            self.terminal_sessions
+                .entry(repo_id)
+                .or_insert_with(|| RepoTerminalSession {
+                    repo_name: terminal_repo_name(&workdir),
+                    workdir,
+                    instances: Vec::new(),
+                    active_index: 0,
+                });
+        session.instances.push(instance);
+        session.active_index = session.instances.len() - 1;
+        self.spawn_terminal_event_task(repo_id, session_seq, cx);
+        self.terminal_sessions_changed(cx);
+        self.activate_repo(repo_id, cx);
+        self.focus_terminal_view(repo_id, window, cx);
+        window.activate();
+        cx.notify();
     }
 
     fn spawn_terminal_event_task(
@@ -379,8 +527,17 @@ impl GitCometView {
                                     "terminal child process: {msg}"
                                 ));
                             }
-                            TerminalBackendEvent::Wakeup
-                            | TerminalBackendEvent::CursorBlinkingChange => {
+                            event @ (TerminalBackendEvent::Output
+                            | TerminalBackendEvent::Wakeup
+                            | TerminalBackendEvent::CursorBlinkingChange) => {
+                                // The shell printed: what an extension asked
+                                // to type can now go in.
+                                if matches!(event, TerminalBackendEvent::Output)
+                                    && let (Some(input), Some(pty)) =
+                                        (instance.pending_input.take(), &instance.pty_sender)
+                                {
+                                    pty.write(input.into_bytes());
+                                }
                                 instance.viewport.update(cx, |viewport, cx| {
                                     viewport.content_epoch = viewport.content_epoch.wrapping_add(1);
                                     cx.notify();
@@ -416,7 +573,7 @@ impl GitCometView {
                 shutdown_terminal_instance(instance, false);
             }
         }
-        self.sync_terminal_indicator_views(cx);
+        self.terminal_sessions_changed(cx);
         cx.notify();
     }
 
@@ -470,7 +627,7 @@ impl GitCometView {
         {
             self.focus_terminal_view(repo_id, window, cx);
         }
-        self.sync_terminal_indicator_views(cx);
+        self.terminal_sessions_changed(cx);
         cx.notify();
     }
 
@@ -531,6 +688,34 @@ impl GitCometView {
         cx.notify();
     }
 
+    /// Shows `terminal` for an extension: makes its repository the active
+    /// one, selects and focuses the tab and activates the window. A tab that
+    /// closed, or a repository that did, is left alone.
+    pub(in crate::view) fn show_terminal_tab(
+        &mut self,
+        terminal: &gitcomet_extension_api::TerminalTab,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.repository_state(&terminal.repository).is_none() {
+            return;
+        }
+        let repo_id = terminal.repository.repo_id();
+        let Some(index) = self
+            .terminal_sessions
+            .get(&repo_id)
+            .and_then(|session| session.index_by_seq(terminal.id.get()))
+        else {
+            return;
+        };
+        self.activate_repo(repo_id, cx);
+        self.select_terminal_tab(repo_id, index, window, cx);
+        window.activate();
+    }
+
+    /// Focuses the repository's active terminal tab and brings the terminal
+    /// to the front of the bottom panel, so focus never lands in a terminal
+    /// hidden behind another panel.
     fn focus_terminal_view(
         &mut self,
         repo_id: RepoId,
@@ -545,6 +730,8 @@ impl GitCometView {
         else {
             return;
         };
+        self.active_bottom_panel
+            .insert(repo_id, BottomPanelTab::Terminal);
         window.focus(&focus_handle, cx);
     }
 
@@ -1230,33 +1417,43 @@ impl GitCometView {
                     .map(|r| r.spec.workdir.clone())
             });
         if let Some(wd) = workdir {
-            let context = ExternalTerminalLaunchContext {
-                cwd: wd,
-                repo_name: self
-                    .terminal_sessions
-                    .get(&repo_id)
-                    .map(|s| s.repo_name.clone()),
-            };
-            match resolve_external_terminal_launch_spec(&self.terminal_preferences, &context) {
-                Ok(spec) => super::platform_open::spawn_launch(
-                    cx,
-                    move || spec.launch(),
-                    |this, result, cx| {
-                        if let Err(err) = result {
-                            this.push_toast(
-                                components::ToastKind::Error,
-                                format!("Failed to open external terminal: {err}"),
-                                cx,
-                            );
-                        }
-                    },
-                ),
-                Err(err) => self.push_toast(
-                    components::ToastKind::Error,
-                    format!("Failed to open external terminal: {err}"),
-                    cx,
-                ),
-            }
+            self.open_external_terminal_at(repo_id, wd, cx);
+        }
+    }
+
+    /// Opens the user's external terminal in `cwd`, for `repo_id`.
+    fn open_external_terminal_at(
+        &mut self,
+        repo_id: RepoId,
+        cwd: PathBuf,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let context = ExternalTerminalLaunchContext {
+            cwd,
+            repo_name: self
+                .terminal_sessions
+                .get(&repo_id)
+                .map(|s| s.repo_name.clone()),
+        };
+        match resolve_external_terminal_launch_spec(&self.terminal_preferences, &context) {
+            Ok(spec) => super::platform_open::spawn_launch(
+                cx,
+                move || spec.launch(),
+                |this, result, cx| {
+                    if let Err(err) = result {
+                        this.push_toast(
+                            components::ToastKind::Error,
+                            format!("Failed to open external terminal: {err}"),
+                            cx,
+                        );
+                    }
+                },
+            ),
+            Err(err) => self.push_toast(
+                components::ToastKind::Error,
+                format!("Failed to open external terminal: {err}"),
+                cx,
+            ),
         }
     }
 
@@ -1288,9 +1485,7 @@ impl GitCometView {
                 self.terminal_panel_resize.is_some(),
                 Some(theme.colors.stroke.subtle),
             ))
-            .on_drag(TerminalPanelResizeDrag, |_payload, _offset, _window, cx| {
-                cx.new(|_cx| super::mod_helpers::ResizeDragGhost)
-            })
+            .on_resize_drag(TerminalPanelResizeDrag)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, e: &MouseDownEvent, _w, cx| {
@@ -1410,6 +1605,11 @@ fn friendly_terminal_title(title: String) -> String {
     stem.to_owned()
 }
 
+/// What is typed for an extension's `command`: the line and Enter.
+pub(in crate::view) fn typed_line(command: &str) -> String {
+    format!("{command}\r")
+}
+
 fn terminal_repo_name(workdir: &std::path::Path) -> String {
     workdir
         .file_name()
@@ -1519,7 +1719,13 @@ fn shutdown_terminal_instance(instance: &TerminalInstance, terminate: bool) {
 /// Works uniformly across platforms via `sysinfo`. Called only on user-initiated
 /// close, so a one-shot process snapshot is acceptable.
 fn terminal_process_has_running_child_command(pid: u32) -> bool {
-    let mut system = sysinfo::System::new();
+    let mut system = match sysinfo::System::new() {
+        Ok(system) => system,
+        Err(err) => {
+            eprintln!("Failed to check running commands for terminal process {pid}: {err}");
+            return true;
+        }
+    };
     // We must enumerate all processes to find any whose *parent* is `pid` (a
     // child-of-pid query can't be narrowed to a single PID), but we only read
     // `parent()`, which is base info — so skip the expensive cmd/environ/exe/cwd

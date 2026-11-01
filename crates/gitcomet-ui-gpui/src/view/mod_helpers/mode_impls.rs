@@ -250,15 +250,8 @@ pub(crate) enum PopoverKind {
         target: String,
         operation: BranchExistsPromptOperation,
     },
-    ForceDeleteBranchConfirm {
-        repo_id: RepoId,
-        name: String,
-    },
-    ForceRemoveWorktreeConfirm {
-        repo_id: RepoId,
-        path: std::path::PathBuf,
-        branch: Option<String>,
-    },
+    ForceDeleteBranchConfirm(gitcomet_state::model::ForceDeleteBranchPrompt),
+    ForceRemoveWorktreeConfirm(gitcomet_state::model::ForceRemoveWorktreePrompt),
     DiscardChangesConfirm {
         repo_id: RepoId,
         area: DiffArea,
@@ -434,6 +427,7 @@ pub(crate) enum PopoverKind {
     CommitMenu {
         repo_id: RepoId,
         commit_id: CommitId,
+        refs: CommitMenuRefs,
     },
     StatusFileMenu {
         repo_id: RepoId,
@@ -559,6 +553,8 @@ pub(crate) enum PopoverKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RepoPopoverKind {
+    RepositoryModeMenu,
+    DisableBareModeConfirm,
     Remote(RemotePopoverKind),
     Worktree(WorktreePopoverKind),
     Submodule(SubmodulePopoverKind),
@@ -632,6 +628,21 @@ pub(crate) enum WorktreePopoverKind {
         path: std::path::PathBuf,
         branch: Option<String>,
     },
+    /// Every worktree a history row's chips stand for, from its "+N" chip.
+    CommitMenu {
+        commit_id: CommitId,
+    },
+}
+
+/// What the Add-worktree dialog opens with when another surface starts it. The
+/// folder always starts as the current worktree's path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorktreeAddPrefill {
+    pub(crate) source: String,
+    pub(crate) create_branch: bool,
+    pub(crate) new_branch: String,
+    /// Open the worktree in a tab once git has created it.
+    pub(crate) open_after: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -956,6 +967,9 @@ pub(crate) struct TerminalInstance {
     pub(crate) viewport: Entity<TerminalViewportView>,
     pub(crate) session_seq: u64,
     pub(crate) title: String,
+    /// What an extension asked to type once the tab first prints: typed
+    /// any earlier, it would race the shell's start.
+    pub(crate) pending_input: Option<String>,
 }
 
 pub(crate) struct RepoTerminalSession {

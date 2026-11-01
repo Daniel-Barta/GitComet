@@ -757,7 +757,7 @@ fn repo_operation_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::T
     assert_shortcut_action!(
         remote_menu_model,
         "F",
-        ContextMenuAction::FetchAll { repo_id: rid } if *rid == repo_id
+        ContextMenuAction::FetchRemote { repo_id: rid, remote } if *rid == repo_id && remote == "origin"
     );
 
     let stash_model = cx.update(|_window, app| {
@@ -857,6 +857,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
             PopoverKind::CommitMenu {
                 repo_id,
                 commit_id: commit_id.clone(),
+                refs: CommitMenuRefs::All,
             },
         )
     });
@@ -1366,6 +1367,7 @@ fn commit_context_menu_disables_history_rewrites_during_active_operations(
                 PopoverKind::CommitMenu {
                     repo_id,
                     commit_id: commit_id.clone(),
+                    refs: CommitMenuRefs::All,
                 },
             )
         })
@@ -1385,6 +1387,7 @@ fn commit_context_menu_disables_history_rewrites_during_active_operations(
                 PopoverKind::CommitMenu {
                     repo_id,
                     commit_id: commit_id.clone(),
+                    refs: CommitMenuRefs::All,
                 },
             )
         });

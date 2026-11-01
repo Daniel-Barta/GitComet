@@ -6,6 +6,7 @@ use super::{
     app_menu, branch_group, components, context_menu_entry_action_at, push_request, repo_picker,
     resolve_checkout_file_path, session,
 };
+use crate::view::WorktreePopoverKind;
 use crate::view::gitcomet_view_requests::{RootRequest, RootRequests as _};
 
 impl PopoverHost {
@@ -15,10 +16,27 @@ impl PopoverHost {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
+        if self.bare_action_reason(&action).is_some() {
+            self.explain_working_tree_required(cx);
+            return;
+        }
         let mut close_after_action = true;
         let mut restore_diff_panel_focus_after_action = false;
         let mut restore_invoker_focus_after_action = true;
         match action {
+            ContextMenuAction::PreviewDisableBareMode { repo_id } => {
+                self.store.dispatch(Msg::PreviewDisableBareMode { repo_id });
+                self.open_popover(
+                    PopoverKind::Repo {
+                        repo_id,
+                        kind: crate::view::RepoPopoverKind::DisableBareModeConfirm,
+                    },
+                    super::super::PopoverAnchor::Centered,
+                    window,
+                    cx,
+                );
+                return;
+            }
             ContextMenuAction::Explorer {
                 repo_id,
                 path,
@@ -226,6 +244,23 @@ impl PopoverHost {
                 self.sidebar_pane.update(cx, |pane, cx| {
                     pane.unpin_all_branches(repo_id, section, cx);
                 });
+            }
+            ContextMenuAction::SetBranchGroupFocus {
+                repo_id,
+                section,
+                remote,
+                path,
+                focused,
+            } => {
+                let targets =
+                    branch_group::focus_targets(self, repo_id, section, remote.as_deref(), &path);
+                if !targets.is_empty() {
+                    self.store.dispatch(Msg::FocusHistoryRefs {
+                        repo_id,
+                        targets,
+                        focused,
+                    });
+                }
             }
             ContextMenuAction::ConfirmDeleteBranchGroup {
                 repo_id,
@@ -493,6 +528,7 @@ impl PopoverHost {
                     directories: true,
                     multiple: false,
                     prompt: Some("Export patch to folder".into()),
+                    directory: None,
                 });
                 window
                     .spawn(cx, async move |cx| {
@@ -652,6 +688,13 @@ impl PopoverHost {
             ContextMenuAction::SetHistoryScope { repo_id, scope } => {
                 self.store.dispatch(Msg::SetHistoryScope { repo_id, scope });
             }
+            ContextMenuAction::ToggleHistoryFocus { repo_id, target } => {
+                self.store
+                    .dispatch(Msg::ToggleHistoryFocus { repo_id, target });
+            }
+            ContextMenuAction::SetHistoryFocus { repo_id, focus } => {
+                self.store.dispatch(Msg::SetHistoryFocus { repo_id, focus });
+            }
             ContextMenuAction::SetCommitFileSort { list, sort } => {
                 self.details_pane.update(cx, |pane, cx| {
                     pane.set_file_list_sort(list, sort, cx);
@@ -781,6 +824,20 @@ impl PopoverHost {
                     repo_id,
                     hidden,
                     ignored,
+                });
+            }
+            ContextMenuAction::SetRemoteHistoryVisibility {
+                repo_id,
+                remote,
+                hidden,
+            } => {
+                self.store.dispatch(Msg::UpdateRepositoryPreference {
+                    repo_id,
+                    update:
+                        gitcomet_state::model::RepositoryPreferenceUpdate::RemoteHistoryVisibility {
+                            remote,
+                            hidden,
+                        },
                 });
             }
             ContextMenuAction::SetChangeTrackingView { view } => {
@@ -948,6 +1005,13 @@ impl PopoverHost {
                 self.store
                     .dispatch(Msg::Fetch(gitcomet_state::msg::FetchMsg::All { repo_id }));
             }
+            ContextMenuAction::FetchRemote { repo_id, remote } => {
+                self.store
+                    .dispatch(Msg::Fetch(gitcomet_state::msg::FetchMsg::Remote {
+                        repo_id,
+                        remote,
+                    }));
+            }
             ContextMenuAction::PruneMergedBranches { repo_id } => {
                 self.store.dispatch(Msg::PruneMergedBranches { repo_id });
             }
@@ -1045,12 +1109,7 @@ impl PopoverHost {
                         );
                         return;
                     }
-                    PushRequest::NoRemotes => self.push_toast(
-                        components::ToastKind::Error,
-                        "Cannot push: no remotes configured".to_string(),
-                        cx,
-                    ),
-                    PushRequest::NotReady => {}
+                    PushRequest::NoRemotes | PushRequest::NotReady => {}
                 }
             }
             ContextMenuAction::SetUpstreamBranch {
@@ -1143,6 +1202,16 @@ impl PopoverHost {
             ContextMenuAction::OpenPopover { kind } => {
                 let anchor = self.popover_anchor_point();
                 self.open_popover_at(kind, anchor, window, cx);
+                return;
+            }
+            ContextMenuAction::OpenWorktreeAddPrompt { repo_id, prefill } => {
+                self.pending_worktree_add_prefill = Some(prefill);
+                self.open_popover_centered(
+                    PopoverKind::worktree(repo_id, WorktreePopoverKind::AddPrompt),
+                    window,
+                    cx,
+                );
+                // Returning keeps `close_after_action` off the dialog just opened.
                 return;
             }
             ContextMenuAction::ConflictResolverPick { target } => {

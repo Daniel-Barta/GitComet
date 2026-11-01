@@ -167,6 +167,22 @@ pub(super) fn image_format_for_path(path: &std::path::Path) -> Option<gpui::Imag
     }
 }
 
+/// The raster format `bytes` are in, read from their signature: for a file
+/// whose name does not say.
+pub(super) fn image_format_for_bytes(bytes: &[u8]) -> Option<gpui::ImageFormat> {
+    match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Png => Some(gpui::ImageFormat::Png),
+        image::ImageFormat::Jpeg => Some(gpui::ImageFormat::Jpeg),
+        image::ImageFormat::Gif => Some(gpui::ImageFormat::Gif),
+        image::ImageFormat::WebP => Some(gpui::ImageFormat::Webp),
+        image::ImageFormat::Bmp => Some(gpui::ImageFormat::Bmp),
+        image::ImageFormat::Tiff => Some(gpui::ImageFormat::Tiff),
+        image::ImageFormat::Ico => Some(gpui::ImageFormat::Ico),
+        image::ImageFormat::Pnm => Some(gpui::ImageFormat::Pnm),
+        _ => None,
+    }
+}
+
 const SVG_PREVIEW_MIN_RASTER_WIDTH_PX: f32 = 1024.0;
 const SVG_PREVIEW_MAX_RASTER_EDGE_PX: f32 = 4096.0;
 
@@ -1005,12 +1021,15 @@ mod tests {
             ))
             .expect("UTF-8 ls-files")
         };
-        let worktree_mode = |repo: &std::path::Path| {
+        let worktree_is_executable = |repo: &std::path::Path| {
+            // Git tracks only the owner executable bit. `git apply` recreates
+            // the file with permissions filtered through the process umask.
             std::fs::metadata(repo.join("run.sh"))
                 .expect("worktree file")
                 .permissions()
                 .mode()
-                & 0o777
+                & 0o100
+                != 0
         };
 
         let (dir, opened, diff) = edited_executable();
@@ -1044,7 +1063,25 @@ mod tests {
             std::fs::read_to_string(dir.path().join("run.sh")).unwrap(),
             "echo one\n"
         );
-        assert_eq!(worktree_mode(dir.path()), 0o755, "discard hunk");
+        assert!(worktree_is_executable(dir.path()), "discard hunk");
+
+        let (dir, opened, diff) = edited_executable();
+        let selected: FxHashSet<usize> = diff
+            .iter()
+            .position(|line| line.text.as_ref() == "+echo two")
+            .into_iter()
+            .collect();
+        let patch =
+            build_unified_patch_for_selected_lines_across_hunks_for_reverse_apply(&diff, &selected)
+                .expect("patch");
+        opened
+            .apply_unified_patch_to_worktree_with_output(&patch, true)
+            .expect("discard line");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("run.sh")).unwrap(),
+            ""
+        );
+        assert!(worktree_is_executable(dir.path()), "discard line");
     }
 
     /// A removed `-- comment` line reads `--- comment` in the diff. Parsed as a

@@ -5,7 +5,7 @@
 
 #[cfg(unix)]
 use gitcomet_core::domain::SignatureFormats;
-use gitcomet_core::domain::{CommitId, SignatureFormat, SignatureStatus};
+use gitcomet_core::domain::{CommitId, DiffTarget, SignatureFormat, SignatureStatus};
 use gitcomet_core::services::{GitBackend, GitRepository};
 use gitcomet_git_gix::GixBackend;
 use std::fs;
@@ -471,6 +471,85 @@ fn log_show_signature_does_not_corrupt_the_batch_parse() {
     assert!(results[0].1.status.is_verified());
 }
 
+/// A signed commit, titled `message`, that sets `name` to `contents`.
+fn commit_contents(repo: &Path, name: &str, contents: &str, message: &str) -> CommitId {
+    fs::write(repo.join(name), contents).expect("write file");
+    run_git(repo, &["add", "."]);
+    run_git(repo, &["commit", "-m", message]);
+    CommitId(git_stdout(repo, &["rev-parse", "HEAD"]).into())
+}
+
+#[test]
+fn log_show_signature_does_not_leak_into_a_commit_diff() {
+    if !ssh_signing_available() {
+        eprintln!("skipping: ssh-keygen with `-Y verify` is unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let fixture = init_signing_repo(dir.path());
+    trust_signatures(&fixture);
+    run_git(&fixture.repo, &["config", "log.showSignature", "true"]);
+
+    commit_contents(&fixture.repo, "a.txt", "one\n", "add");
+    // A modification, so the diff comes from `git show` and not from blobs.
+    let modified = commit_contents(&fixture.repo, "a.txt", "one\ntwo\n", "modify");
+
+    let diff = open(&fixture.repo)
+        .diff_unified(&DiffTarget::commit(modified, "a.txt".into()))
+        .expect("commit diff");
+
+    assert!(
+        diff.starts_with("diff --git "),
+        "the signature check must not precede the patch, got {diff:?}"
+    );
+}
+
+#[test]
+fn log_show_signature_does_not_corrupt_file_history() {
+    if !ssh_signing_available() {
+        eprintln!("skipping: ssh-keygen with `-Y verify` is unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let fixture = init_signing_repo(dir.path());
+    trust_signatures(&fixture);
+    run_git(&fixture.repo, &["config", "log.showSignature", "true"]);
+
+    let first = commit_contents(&fixture.repo, "a.txt", "one\n", "add");
+    let second = commit_contents(&fixture.repo, "a.txt", "one\ntwo\n", "modify");
+
+    let page = open(&fixture.repo)
+        .log_file_page(Path::new("a.txt"), 10, None)
+        .expect("file history");
+
+    let ids: Vec<_> = page.commits.iter().map(|commit| &commit.id).collect();
+    assert_eq!(ids, [&second, &first]);
+    assert_eq!(page.commits[0].summary.as_ref(), "modify");
+}
+
+#[test]
+fn log_show_signature_does_not_corrupt_the_interactive_rebase_list() {
+    if !ssh_signing_available() {
+        eprintln!("skipping: ssh-keygen with `-Y verify` is unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let fixture = init_signing_repo(dir.path());
+    trust_signatures(&fixture);
+    run_git(&fixture.repo, &["config", "log.showSignature", "true"]);
+
+    let base = commit_contents(&fixture.repo, "a.txt", "one\n", "add");
+    let modified = commit_contents(&fixture.repo, "a.txt", "one\ntwo\n", "modify");
+
+    let entries = open(&fixture.repo)
+        .list_commits_for_interactive_rebase(base.as_ref())
+        .expect("interactive rebase list");
+
+    assert_eq!(entries.len(), 1, "got {entries:?}");
+    assert_eq!(entries[0].commit_id, modified.as_ref());
+    assert_eq!(entries[0].summary, "modify");
+}
+
 #[test]
 fn verification_forces_utf8_despite_log_output_encoding() {
     if !ssh_signing_available() {
@@ -501,13 +580,6 @@ fn verification_forces_utf8_despite_log_output_encoding() {
 }
 
 #[cfg(unix)]
-fn write_program(path: &Path, contents: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    fs::write(path, contents).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-#[cfg(unix)]
 #[test]
 fn unavailable_ssh_verifiers_do_not_claim_the_signature_is_bad() {
     if !ssh_signing_available() {
@@ -520,7 +592,7 @@ fn unavailable_ssh_verifiers_do_not_claim_the_signature_is_bad() {
     // A small payload races the exiting verifier; a huge one always loses.
     let huge = commit_with_huge_message(&fixture.repo, "huge.txt");
     let signing_only = dir.path().join("signing-only");
-    write_program(
+    gitcomet_core::test_support::script::write_executable(
         &signing_only,
         "#!/bin/sh\necho 'This helper only supports signing' >&2\nexit 1\n",
     );
@@ -578,7 +650,7 @@ fn a_verifier_that_kills_git_costs_only_that_commits_badge() {
     // Verifies trusted keys, but abandons `check-novalidate` unread, so git
     // dies of SIGPIPE partway through the batch.
     let verifier = dir.path().join("no-check-novalidate");
-    write_program(
+    gitcomet_core::test_support::script::write_executable(
         &verifier,
         "#!/bin/sh\n[ \"$2\" = check-novalidate ] && exit 1\nexec ssh-keygen \"$@\"\n",
     );
@@ -648,7 +720,7 @@ fn signature_verification_runs_in_bounded_batches() {
         .collect();
     let calls = dir.path().join("verify-calls");
     let verifier = dir.path().join("counting-verifier");
-    write_program(
+    gitcomet_core::test_support::script::write_executable(
         &verifier,
         &format!(
             "#!/bin/sh\n[ \"$2\" = verify ] && echo $PPID >> '{}'\nexec ssh-keygen \"$@\"\n",
@@ -701,7 +773,7 @@ fn cancellation_stops_a_running_signature_verifier() {
     trust_signatures(&fixture);
     let id = commit(&fixture.repo, "signed.txt", true);
     let verifier = dir.path().join("blocked-verifier");
-    write_program(
+    gitcomet_core::test_support::script::write_executable(
         &verifier,
         "#!/bin/sh\ntouch verifier-started\nexec sleep 60\n",
     );
@@ -752,7 +824,7 @@ fn a_format_without_a_verifier_is_skipped_without_running_one() {
     trust_signatures(&fixture);
     let id = commit(&fixture.repo, "signed.txt", true);
     let verifier = dir.path().join("recording-verifier");
-    write_program(
+    gitcomet_core::test_support::script::write_executable(
         &verifier,
         "#!/bin/sh\ntouch verifier-ran\nexec ssh-keygen \"$@\"\n",
     );

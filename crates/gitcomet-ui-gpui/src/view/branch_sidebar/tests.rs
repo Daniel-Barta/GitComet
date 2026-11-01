@@ -523,6 +523,7 @@ fn populated_repo() -> RepoState {
     repo.remotes = Loadable::Ready(Arc::new(vec![Remote {
         name: "origin".to_string(),
         url: Some("https://example.com/origin.git".to_string()),
+        default_branch: None,
     }]));
     repo.remotes_rev = 1;
     repo.remote_branches = Loadable::Ready(Arc::new(vec![RemoteBranch {
@@ -533,12 +534,14 @@ fn populated_repo() -> RepoState {
     repo.remote_branches_rev = 1;
     repo.worktrees = Loadable::Ready(Arc::new(vec![
         Worktree {
+            bare: false,
             path: PathBuf::from("/tmp/repo"),
             head: Some(commit_id("aaaaaaaa")),
             branch: Some("main".to_string()),
             detached: false,
         },
         Worktree {
+            bare: false,
             path: PathBuf::from("/tmp/repo-linked"),
             head: Some(commit_id("bbbbbbbb")),
             branch: Some("feature/topic".to_string()),
@@ -652,12 +655,14 @@ fn source_fingerprint_reuses_unchanged_partitions_when_worktrees_change() {
 
     repo.worktrees = Loadable::Ready(Arc::new(vec![
         Worktree {
+            bare: false,
             path: PathBuf::from("/tmp/repo"),
             head: Some(commit_id("aaaaaaaa")),
             branch: Some("main".to_string()),
             detached: false,
         },
         Worktree {
+            bare: false,
             path: PathBuf::from("/tmp/repo-linked"),
             head: Some(commit_id("eeeeeeee")),
             branch: None,
@@ -720,6 +725,7 @@ fn remote_rows_dedup_upstream_branches_that_also_exist_as_remote_refs() {
     repo.remotes = Loadable::Ready(Arc::new(vec![Remote {
         name: "origin".to_string(),
         url: Some("https://example.com/origin.git".to_string()),
+        default_branch: None,
     }]));
     repo.remotes_rev = 1;
     repo.remote_branches = Loadable::Ready(Arc::new(vec![RemoteBranch {
@@ -768,6 +774,7 @@ fn remote_rows_do_not_recreate_a_missing_upstream_tracking_ref() {
     repo.remotes = Loadable::Ready(Arc::new(vec![Remote {
         name: "origin".to_string(),
         url: Some("https://example.com/origin.git".to_string()),
+        default_branch: None,
     }]));
     repo.remote_branches = Loadable::Ready(Arc::new(Vec::new()));
 
@@ -846,4 +853,64 @@ fn branch_tooltip_only_appends_upstream_note_when_requested() {
         branch_sidebar_branch_tooltip("origin/main", true).as_ref(),
         "Branch: origin/main (upstream for current branch)"
     );
+}
+
+#[test]
+fn a_remote_hidden_from_history_marks_its_header_and_changes_the_cache_source() {
+    let mut repo = RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    );
+    repo.remotes = Loadable::Ready(Arc::new(
+        ["origin", "upstream"]
+            .map(|name| Remote {
+                name: name.into(),
+                url: None,
+                default_branch: None,
+            })
+            .to_vec(),
+    ));
+    let hidden_headers = |repo: &RepoState| {
+        branch_sidebar_rows(repo, &BTreeSet::new(), &BTreeSet::new(), "")
+            .into_iter()
+            .filter_map(|row| match row {
+                BranchSidebarRow::RemoteHeader {
+                    name,
+                    hidden_in_history,
+                    ..
+                } => Some((name.to_string(), hidden_in_history)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        hidden_headers(&repo),
+        [
+            ("origin".to_string(), false),
+            ("upstream".to_string(), false)
+        ]
+    );
+    let (shown_source, cached) = branch_sidebar_source_fingerprint(&repo, None);
+
+    crate::view::test_support::hide_remotes_in_history(&mut repo, &["upstream"]);
+    assert_eq!(
+        hidden_headers(&repo),
+        [
+            ("origin".to_string(), false),
+            ("upstream".to_string(), true)
+        ]
+    );
+    assert!(!branch_sidebar_source_matches_cached(&repo, &cached));
+    let (hidden_source, parts) = branch_sidebar_source_fingerprint(&repo, Some(&cached));
+    assert_eq!(
+        hidden_source,
+        branch_sidebar_source_fingerprint(&repo, None).0
+    );
+    assert_ne!(
+        shown_source, hidden_source,
+        "cached rows must not be reused"
+    );
+    assert!(branch_sidebar_source_matches_cached(&repo, &parts));
 }

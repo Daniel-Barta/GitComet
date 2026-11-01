@@ -320,6 +320,7 @@ mod file_list_controller;
 mod file_operations;
 mod fingerprint;
 mod git_version_notice;
+pub(crate) mod history_focus;
 mod history_graph;
 pub(crate) mod history_mode;
 mod history_refs_hover;
@@ -341,6 +342,7 @@ mod pane_store;
 mod panels;
 mod panes;
 mod patch_split;
+mod path_prompt;
 mod pending_commit;
 mod perf;
 mod permalink;
@@ -390,8 +392,8 @@ use caches::{
     HistoryAuthorVm, HistoryBaseCache, HistoryBaseCacheRequest, HistoryBaseRowVm,
     HistoryBranchChipKind, HistoryBranchChipVm, HistoryCache, HistoryCacheBuildRequest,
     HistoryDecorationCache, HistoryDecorationCacheRequest, HistoryDecorationRowVm,
-    HistoryDisplayKey, HistoryRefListItem, HistoryRefListItemKind, HistoryStashIdsCache,
-    HistoryTextVm, HistoryWorktreeSummaryCache,
+    HistoryDisplayKey, HistoryRefListItem, HistoryRefListItemKind, HistoryRemoteBranchesKey,
+    HistoryStashIdsCache, HistoryTextVm, HistoryWorktreeSummaryCache,
 };
 use chrome::TitleBarView;
 use conflict_resolver::{ConflictPickSide, ConflictResolverViewMode};
@@ -441,14 +443,15 @@ pub use mod_helpers::{
     GitCometViewMode, InitialRepositoryLaunchMode, StartupCrashReport, WorkspaceBootstrap,
 };
 use panels::{
-    ActionBarView, BottomStatusBarView, PopoverHost, PopoverHostInit, RepoTabsBarView,
-    action_bar_density, action_bar_height, bottom_status_bar_height,
+    ActionBarView, BottomStatusBarView, CommitMenuRefs, HistoryMenuRef, PopoverHost,
+    PopoverHostInit, RepoTabsBarView, action_bar_density, action_bar_height,
+    bottom_status_bar_height,
 };
 pub(crate) use panes::DiffRenderer;
 use panes::{
-    CollapsedSidebarSection, DetailsPaneInit, DetailsPaneView, DiffRendererInit,
-    HistoryPrimarySelection, HistoryView, MainPaneView, ReflogPaneInit, ReflogPaneView,
-    SidebarPaneView, history_primary_selection,
+    CollapsedSidebarSection, CommitRewordDraft, CommitRewordSubmission, DetailsPaneInit,
+    DetailsPaneView, DiffRendererInit, HistoryPrimarySelection, HistoryView, MainPaneView,
+    ReflogPaneInit, ReflogPaneView, SidebarPaneView, history_primary_selection,
 };
 pub(crate) use settings_window::{
     SettingsWindowView, open_settings_window, open_settings_window_to_workspace,

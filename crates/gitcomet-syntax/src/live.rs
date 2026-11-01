@@ -363,6 +363,7 @@ pub struct LiveSyntaxLayer {
     spec: &'static TreesitterHighlightSpec,
     tree: tree_sitter::Tree,
     ranges: Vec<Range<usize>>,
+    content_mode: InjectionContentMode,
     /// 1 for a layer injected by the root, 2 for one injected by a layer.
     depth: u8,
     /// Its edited tree still needs parsing. Nested ownership must be retained
@@ -370,30 +371,41 @@ pub struct LiveSyntaxLayer {
     pending: bool,
 }
 
+/// `range` in the text after `edit`. Layer ownership has left affinity at its
+/// start: text typed directly after `<script>` or at a Markdown paragraph start
+/// belongs to that layer. Tree-sitter's included-range start has right
+/// affinity, which would exclude that text and prevent reuse on the next parse.
+fn shift_range_for_edit(range: Range<usize>, edit: &tree_sitter::InputEdit) -> Range<usize> {
+    let shifted = |offset: usize| offset - edit.old_end_byte + edit.new_end_byte;
+    let start = if range.start <= edit.start_byte {
+        range.start
+    } else if range.start < edit.old_end_byte {
+        edit.start_byte
+    } else {
+        shifted(range.start)
+    };
+    let end = if range.end < edit.start_byte {
+        range.end
+    } else if range.end < edit.old_end_byte {
+        edit.start_byte
+    } else {
+        shifted(range.end)
+    };
+    start..end
+}
+
 impl LiveSyntaxLayer {
     fn edit(&mut self, edit: &tree_sitter::InputEdit) {
         self.tree.edit(edit);
-        self.pending = true;
-        // Layer ownership has left affinity at its start: text typed directly
-        // after `<script>` or at a Markdown paragraph start belongs to that
-        // layer. Tree-sitter's included-range start has right affinity, which
-        // would exclude that text and prevent reuse on the next parse.
+        // Elsewhere `tree.edit` only shifts this layer's nodes, so its tree
+        // stays current. Either end counts as touched: ownership has left
+        // affinity at the start, and the end may grow.
+        let hull = self.hull();
+        if edit.start_byte <= hull.end && hull.start <= edit.old_end_byte {
+            self.pending = true;
+        }
         for range in &mut self.ranges {
-            let shifted = |offset: usize| offset - edit.old_end_byte + edit.new_end_byte;
-            range.start = if range.start <= edit.start_byte {
-                range.start
-            } else if range.start < edit.old_end_byte {
-                edit.start_byte
-            } else {
-                shifted(range.start)
-            };
-            range.end = if range.end < edit.start_byte {
-                range.end
-            } else if range.end < edit.old_end_byte {
-                edit.start_byte
-            } else {
-                shifted(range.end)
-            };
+            *range = shift_range_for_edit(range.clone(), edit);
         }
         self.ranges.retain(|range| !range.is_empty());
     }
@@ -408,6 +420,29 @@ impl LiveSyntaxLayer {
         let end = self.ranges.last().map(|range| range.end).unwrap_or(0);
         start..end.max(start)
     }
+}
+
+fn subtract_owned_layer_ranges(hits: &mut Vec<LayerCapture>, layer: &LiveSyntaxLayer) {
+    let mut clipped = Vec::with_capacity(hits.len());
+    for hit in hits.drain(..) {
+        if hit.depth >= layer.depth {
+            clipped.push(hit);
+            continue;
+        }
+        let first = layer
+            .ranges
+            .partition_point(|range| range.end <= hit.range.start);
+        let remaining = &layer.ranges[first..];
+        let count = remaining.partition_point(|range| range.start < hit.range.end);
+        if count == 0 {
+            clipped.push(hit);
+            continue;
+        }
+        for range in combined_injection_gaps(hit.range.clone(), &remaining[..count]) {
+            clipped.push(LayerCapture { range, ..hit });
+        }
+    }
+    *hits = clipped;
 }
 
 /// Parse the injected grammars found in `tree`, to `TS_MAX_INJECTION_DEPTH` so
@@ -473,7 +508,7 @@ fn parse_injection_layers(
 /// injected grammar sees, so half a group is worse than none.
 struct InjectionTargets {
     singles: Vec<(DiffSyntaxLanguage, Range<usize>)>,
-    groups: Vec<(DiffSyntaxLanguage, usize, Vec<Range<usize>>)>,
+    groups: Vec<(DiffSyntaxLanguage, InjectionContentMode, Vec<Range<usize>>)>,
     incomplete: bool,
 }
 
@@ -541,20 +576,19 @@ fn collect_injection_targets(
                 }
                 if let Some(language) = injection_language_for_match(rope, query, m, language_ix) {
                     let pattern_ix = m.pattern_index;
-                    let is_combined = spec.is_combined_injection_pattern(pattern_ix);
+                    let combined_mode = spec.combined_injection_content_mode(pattern_ix);
                     for capture in m.captures().iter().filter(|c| c.index == content_ix) {
-                        if let Some(range) =
+                        if let Some(mode) = combined_mode {
+                            append_injection_content_byte_ranges(
+                                capture.node,
+                                rope.len(),
+                                mode,
+                                combined_ranges.entry((language, pattern_ix)).or_default(),
+                            );
+                        } else if let Some(range) =
                             normalized_injection_content_byte_range(capture.node, rope.len())
-                            && !range.is_empty()
                         {
-                            if is_combined {
-                                combined_ranges
-                                    .entry((language, pattern_ix))
-                                    .or_default()
-                                    .push(range);
-                            } else {
-                                targets.singles.push((language, range));
-                            }
+                            targets.singles.push((language, range));
                         }
                     }
                 }
@@ -589,7 +623,15 @@ fn collect_injection_targets(
     // highlighted it. `deadline` already bounds this parse, and a layer it drops
     // sets `dropped` so the off-thread reparse restores it.
     if has_combined && !truncated {
-        targets.groups = combined_injection_groups_in_apply_order(combined_ranges);
+        targets.groups = combined_injection_groups_in_apply_order(combined_ranges)
+            .into_iter()
+            .map(|(language, pattern_ix, ranges)| {
+                let mode = spec
+                    .combined_injection_content_mode(pattern_ix)
+                    .expect("combined group has a compiled content mode");
+                (language, mode, ranges)
+            })
+            .collect();
     }
     targets.incomplete = truncated;
     targets
@@ -751,22 +793,19 @@ impl<'a> InjectionParser<'a> {
         let singles = targets
             .singles
             .into_iter()
-            .map(|(language, range)| (language, vec![range]));
-        let groups = targets
-            .groups
-            .into_iter()
-            .map(|(language, _, ranges)| (language, ranges));
+            .map(|(language, range)| (language, InjectionContentMode::WholeNode, vec![range]));
+        let groups = targets.groups.into_iter();
         let mut targets = singles.chain(groups).enumerate().collect::<Vec<_>>();
         let mut results = (0..targets.len()).map(|_| Vec::new()).collect::<Vec<_>>();
         if let Some(priority) = &self.priority {
-            targets.sort_by_key(|(_, (_, ranges))| {
+            targets.sort_by_key(|(_, (_, _, ranges))| {
                 !ranges
                     .iter()
                     .any(|range| range.start <= priority.end && range.end >= priority.start)
             });
         }
         let mut dropped = false;
-        for (order, (language, ranges)) in targets {
+        for (order, (language, content_mode, ranges)) in targets {
             let Some(layer_spec) = tree_sitter_highlight_spec(language) else {
                 continue;
             };
@@ -779,10 +818,19 @@ impl<'a> InjectionParser<'a> {
             }
             let candidates = self.overlapping_previous(depth, layer_spec, &ranges);
             let exact = candidates.iter().copied().find(|&index| {
-                self.previous[index]
-                    .as_ref()
-                    .is_some_and(|layer| layer.ranges == ranges)
+                self.previous[index].as_ref().is_some_and(|layer| {
+                    layer.ranges == ranges && layer.content_mode == content_mode
+                })
             });
+            // Same ownership and untouched by the edit: nothing to reparse.
+            if let Some(index) = exact
+                && self.previous[index]
+                    .as_ref()
+                    .is_some_and(|layer| !layer.pending)
+            {
+                results[order].extend(self.previous[index].take());
+                continue;
+            }
             // Moving an exact match avoids cloning hundreds of trees on the
             // usual timeout path. A changed boundary can still use an
             // overlapping tree as an incremental seed.
@@ -805,6 +853,7 @@ impl<'a> InjectionParser<'a> {
                     spec: layer_spec,
                     tree,
                     ranges,
+                    content_mode,
                     depth,
                     pending: false,
                 }),
@@ -824,6 +873,7 @@ impl<'a> InjectionParser<'a> {
                                 if !ranges.is_empty() {
                                     results[order].push(LiveSyntaxLayer {
                                         ranges,
+                                        content_mode,
                                         pending: true,
                                         ..previous.clone()
                                     });
@@ -960,7 +1010,8 @@ pub struct LiveSyntaxDocument {
     rope: Rope,
     mask: Arc<[Range<usize>]>,
     tree: tree_sitter::Tree,
-    /// Injected grammars, depth 1 then 2, edited and reparsed with the root tree.
+    /// Injected grammars, depth 1 then 2, edited with the root tree; reparsed
+    /// only when an edit touches them or the mask over them changes.
     injections: Vec<LiveSyntaxLayer>,
     stale: bool,
     version: u64,
@@ -1070,7 +1121,7 @@ impl LiveSyntaxDocument {
         }
 
         let priority = edit.as_ref().map(|(_, inserted)| inserted.clone());
-        let seed = match edit {
+        let input_edit = match edit {
             Some((replaced, inserted)) => {
                 // Positions come straight off the summaries — an O(log n)
                 // descent each, with no line-start array to keep in step.
@@ -1089,13 +1140,35 @@ impl LiveSyntaxDocument {
                     layer.edit(&edit);
                 }
                 self.injections.retain(|layer| !layer.ranges.is_empty());
-                true
+                Some(edit)
             }
             None => {
                 self.injections.clear();
-                false
+                None
             }
         };
+        let seed = input_edit.is_some();
+        // A mask change matters only where it covers a layer: compare the old
+        // mask, moved by the edit, with the new one over each layer's span.
+        if *self.mask != *mask {
+            let moved = self
+                .mask
+                .iter()
+                .map(|range| match &input_edit {
+                    Some(edit) => shift_range_for_edit(range.clone(), edit),
+                    None => range.clone(),
+                })
+                .filter(|range| !range.is_empty())
+                .collect::<Vec<_>>();
+            for layer in &mut self.injections {
+                let hull = [layer.hull()];
+                if intersect_sorted_ranges(&moved, &hull)
+                    != intersect_sorted_ranges(mask.as_ref(), &hull)
+                {
+                    layer.pending = true;
+                }
+            }
+        }
 
         self.rope = rope;
         self.mask = mask;
@@ -1325,6 +1398,9 @@ impl<P: SyntaxPalette> LiveSyntaxSnapshot<P> {
             for layer in &inner.injections {
                 let hull = layer.hull();
                 if hull.start < pass.end && hull.end > pass.start {
+                    if layer.content_mode == InjectionContentMode::ExcludeNamedChildren {
+                        subtract_owned_layer_ranges(&mut hits, layer);
+                    }
                     collect_layer_captures(
                         layer.spec,
                         &layer.tree,
@@ -1462,3 +1538,6 @@ mod tests;
 /// read-only diff panes above it, which have had injections all along.
 #[cfg(test)]
 mod injection_tests;
+
+#[cfg(test)]
+mod razor_tests;

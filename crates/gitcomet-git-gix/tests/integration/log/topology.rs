@@ -24,7 +24,13 @@ fn indexed_history_scans_headers_once_and_reuses_bootstrap_topology() {
     // The application requests its index after the bootstrap page. The index,
     // resumed pages and filtered views must all reuse the same topology.
     let index = repo
-        .build_history_index(HistoryMode::FullReachable, None, &cancel, &mut |_| {})
+        .build_history_index(
+            &HistoryMode::FullReachable.into(),
+            None,
+            &Default::default(),
+            &cancel,
+            &mut |_| {},
+        )
         .unwrap()
         .unwrap();
     assert_eq!(index.len(), 4_096);
@@ -40,7 +46,13 @@ fn indexed_history_scans_headers_once_and_reuses_bootstrap_topology() {
     assert_eq!(&rows.commits[..20], first.commits.as_slice());
     assert_eq!(&rows.commits[20..], second.commits.as_slice());
     let filtered = repo
-        .build_history_index(HistoryMode::NoMerges, Some("You"), &cancel, &mut |_| {})
+        .build_history_index(
+            &HistoryMode::NoMerges.into(),
+            Some("You"),
+            &Default::default(),
+            &cancel,
+            &mut |_| {},
+        )
         .unwrap()
         .unwrap();
     assert_eq!(filtered.len(), index.len());
@@ -50,7 +62,13 @@ fn indexed_history_scans_headers_once_and_reuses_bootstrap_topology() {
     // Same repository handle, new ref snapshot. Old indexed ranges stay valid.
     run_git(dir.path(), &["reset", "-q", "--hard", "HEAD~100"]);
     let changed = repo
-        .build_history_index(HistoryMode::FullReachable, None, &cancel, &mut |_| {})
+        .build_history_index(
+            &HistoryMode::FullReachable.into(),
+            None,
+            &Default::default(),
+            &cancel,
+            &mut |_| {},
+        )
         .unwrap()
         .unwrap();
     assert_eq!(changed.len(), 3_996);
@@ -125,7 +143,13 @@ fn indexed_history_compact_order_matches_gix_with_skew_ties_and_redundant_tips()
         let _capture = capture();
         let cancel = CancellationToken::new();
         let index = repo
-            .build_history_index(HistoryMode::AllBranches, None, &cancel, &mut |_| {})
+            .build_history_index(
+                &HistoryMode::AllBranches.into(),
+                None,
+                &Default::default(),
+                &cancel,
+                &mut |_| {},
+            )
             .unwrap()
             .unwrap();
         assert_eq!(count(Work::LogWalkObjectRead), 256);
@@ -163,4 +187,71 @@ fn indexed_history_uses_existing_commit_graph_without_eager_object_scan() {
     assert_eq!(first.commits.len(), 20);
     assert_eq!(count(Work::LogWalkObjectRead), 0);
     assert_eq!(count(Work::LogTopologyBuild), 0);
+}
+
+#[test]
+fn indexed_history_honors_replacement_refs_like_git_and_bypasses_the_commit_graph() {
+    fn rows(commits: &[gitcomet_core::domain::Commit]) -> Vec<String> {
+        commits
+            .iter()
+            .map(|commit| {
+                let parents: Vec<_> = commit.parent_ids.iter().map(|id| id.as_ref()).collect();
+                format!("{} {} {}", commit.id, parents.join(" "), commit.summary)
+            })
+            .collect()
+    }
+    fn assert_matches_git(repo: &Path) {
+        let expected: Vec<String> = git_stdout(repo, &["log", "--format=%H %P %s"])
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let opened = GixBackend.open(repo).unwrap();
+        let cancel = CancellationToken::new();
+        let page = opened
+            .log_history_mode_page(HistoryMode::FullReachable, 50, None, &cancel)
+            .unwrap();
+        assert_eq!(
+            rows(&page.commits),
+            expected,
+            "page rows must match git log"
+        );
+        let index = opened
+            .build_history_index(
+                &HistoryMode::FullReachable.into(),
+                None,
+                &Default::default(),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap()
+            .unwrap();
+        let indexed = opened
+            .read_history_range(&index, 0..index.len(), &cancel)
+            .unwrap();
+        assert_eq!(
+            rows(&indexed.commits),
+            expected,
+            "index rows must match git log"
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    run_git(repo, &["init", "-q", "-b", "master"]);
+    fast_import_linear_history(repo, 8);
+    // The graph records the original parents, so it must not be consulted
+    // while a replacement is installed.
+    run_git(repo, &["commit-graph", "write", "--reachable"]);
+    run_git(repo, &["replace", "HEAD~2", "HEAD~5"]);
+    assert_eq!(
+        git_stdout(repo, &["log", "--format=%s"])
+            .lines()
+            .collect::<Vec<_>>(),
+        ["c7", "c6", "c2", "c1", "c0"]
+    );
+    assert_matches_git(repo);
+
+    run_git(repo, &["config", "core.useReplaceRefs", "false"]);
+    assert_eq!(git_stdout(repo, &["log", "--format=%s"]).lines().count(), 8);
+    assert_matches_git(repo);
 }

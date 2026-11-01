@@ -10,6 +10,19 @@ The checked-in source is the published crate, with these focused changes:
   the leaf options it implements for unsupported-setting diagnostics.
 * Measure text using gitcomet-fonts. Remove system font discovery and the disk
   font cache. Cache up to 2048 exact text widths with bounded key lengths. Fall back to the same bundled sans family used by SVG decoding.
+  Read glyph advances with skrifa, which gpui already links, instead of
+  upstream's unmaintained ttf-parser.
+* Build as a workspace member and inherit every dependency from the root
+  workspace manifest, so the renderer cannot drift onto second copies (it had
+  fontdb 0.23 and lru 0.18 beside the workspace's 0.24 and 0.19). Match usvg to
+  resvg's version so their SVG tree types agree in the PNG output path.
+  Restore the five comparison fixtures used by upstream's unit tests from the
+  published crate's source revision, `2f993bd79a55235eb59a34d807852276ba25bea7`,
+  so unit tests and doc examples build with workspace checks, including
+  `--all-targets`. Two upstream clippy style lints are allowed.
+* Align the upstream parser test with the explicit-header requirement. Check
+  subgraph entry alignment using node centers, independently of edge ports
+  that are deliberately spaced apart for multiple incoming connections.
 
 GitComet uses strict parsing, then configuration, layout and SVG exactly once.
 Font selection, YAML frontmatter and SVG checks live in gitcomet-diagrams.

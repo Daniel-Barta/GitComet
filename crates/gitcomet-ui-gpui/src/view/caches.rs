@@ -50,12 +50,30 @@ pub(super) struct HistoryBaseCacheRequest {
     pub(super) history_scope: LogScope,
     pub(super) log_source: usize,
     pub(super) history_author_filter: Option<String>,
+    pub(super) history_focus: gitcomet_core::domain::HistoryFocusSet,
     pub(super) head_branch_rev: u64,
     pub(super) detached_head_commit: Option<CommitId>,
     pub(super) head_branch_target: Option<CommitId>,
     pub(super) branches_rev: u64,
-    pub(super) remote_branches_rev: u64,
+    pub(super) remote_branches: HistoryRemoteBranchesKey,
     pub(super) stashes_rev: u64,
+}
+
+/// The remote branches the graph shows: the loaded list's revision and the
+/// remotes hidden from the history.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct HistoryRemoteBranchesKey {
+    pub(super) rev: u64,
+    pub(super) hidden: std::collections::BTreeSet<String>,
+}
+
+impl HistoryRemoteBranchesKey {
+    pub(super) fn of(repo: &RepoState) -> Self {
+        Self {
+            rev: repo.remote_branches_rev,
+            hidden: repo.history_hidden_remotes().clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,7 +82,7 @@ pub(super) struct HistoryDecorationCacheRequest {
     pub(super) head_branch_rev: u64,
     pub(super) detached_head_commit: Option<CommitId>,
     pub(super) branches_rev: u64,
-    pub(super) remote_branches_rev: u64,
+    pub(super) remote_branches: HistoryRemoteBranchesKey,
     pub(super) tags_rev: u64,
 }
 
@@ -174,6 +192,14 @@ impl HistoryVisibleIndices {
         match self {
             Self::All { len } => (visible_ix < *len).then_some(visible_ix),
             Self::Filtered(indices) => indices.get(visible_ix).copied(),
+        }
+    }
+
+    /// The row showing the page's commit `commit_ix`, if it is shown.
+    pub(in crate::view) fn visible_ix(&self, commit_ix: usize) -> Option<usize> {
+        match self {
+            Self::All { len } => (commit_ix < *len).then_some(commit_ix),
+            Self::Filtered(indices) => indices.binary_search(&commit_ix).ok(),
         }
     }
 
@@ -1716,6 +1742,67 @@ pub(super) struct HistoryStashIdsCache {
     pub(super) repo_id: RepoId,
     pub(super) stashes_rev: u64,
     pub(super) ids: Arc<FxHashSet<CommitId>>,
+}
+
+/// Another worktree, marked on the commit it has checked out.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::view) struct HistoryWorktreeChip {
+    pub(in crate::view) path: std::path::PathBuf,
+    pub(in crate::view) label: SharedString,
+}
+
+pub(in crate::view) type HistoryWorktreeChipsByHead =
+    FxHashMap<CommitId, SmallVec<[HistoryWorktreeChip; 1]>>;
+
+/// Every other worktree with a HEAD, grouped by that commit in list order.
+pub(in crate::view) fn history_worktree_chips_by_head(
+    worktrees: &[gitcomet_core::domain::Worktree],
+    own_workdir: &std::path::Path,
+) -> HistoryWorktreeChipsByHead {
+    let mut chips = HistoryWorktreeChipsByHead::default();
+    for worktree in worktrees {
+        if worktree.path == own_workdir {
+            continue;
+        }
+        let Some(head) = &worktree.head else {
+            continue;
+        };
+        chips
+            .entry(head.clone())
+            .or_default()
+            .push(HistoryWorktreeChip {
+                path: worktree.path.clone(),
+                label: super::rows::sidebar::worktree_origin_label(
+                    worktree.branch.as_deref(),
+                    worktree.detached,
+                    &worktree.path,
+                ),
+            });
+    }
+    chips
+}
+
+/// The chips a commit's row shows. Dirty worktrees are left out: their chips
+/// sit on their changes rows.
+pub(in crate::view) fn history_commit_worktree_chips(
+    chips: &HistoryWorktreeChipsByHead,
+    commit_id: &CommitId,
+    dirty: &[gitcomet_core::domain::WorktreeDirtySummary],
+) -> SmallVec<[HistoryWorktreeChip; 1]> {
+    chips
+        .get(commit_id)
+        .into_iter()
+        .flatten()
+        .filter(|chip| !dirty.iter().any(|summary| summary.path == chip.path))
+        .cloned()
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct HistoryWorktreeChipsCache {
+    pub(super) repo_id: RepoId,
+    pub(super) worktrees_rev: u64,
+    pub(super) chips: Arc<HistoryWorktreeChipsByHead>,
 }
 
 impl GitCometView {
