@@ -410,14 +410,20 @@ pub(super) fn select_commit_multi(
 
     // Two or more consecutive commits enter "compare" mode: the details pane
     // shows the merged diff of the whole selection — every selected commit's
-    // own changes, combined — instead of a plain list. A single commit, or a
-    // selection with no such diff (see `merged_selection_range`), falls back to
-    // the single/multi-list behavior below.
+    // own changes, combined — instead of a plain list. A Ctrl/Cmd+Shift-click
+    // pair shows the direct diff between its two commits instead. A single
+    // commit, or a selection with no such diff (see `merged_selection_range`),
+    // falls back to the single/multi-list behavior below.
     let range_pair = {
-        let selected = &repo_state.history_state.multi_selection.commits;
-        (selected.len() >= 2)
-            .then(|| merged_selection_range(repo_state, selected))
-            .flatten()
+        let selection = &repo_state.history_state.multi_selection;
+        let selected = &selection.commits;
+        if selection.compare_pair {
+            compare_pair_range(repo_state, selected)
+        } else {
+            (selected.len() >= 2)
+                .then(|| merged_selection_range(repo_state, selected))
+                .flatten()
+        }
     };
 
     let mut effects = match range_pair {
@@ -574,6 +580,43 @@ fn merged_selection_range(
         .cloned()
         .or_else(|| empty_tree_id_like(&oldest.id))?;
     Some((from, newest.id.clone()))
+}
+
+/// Endpoints for a Ctrl/Cmd+Shift-click pair, `[anchor, clicked]`: the direct
+/// diff from the older commit to the newer one, whichever was clicked first.
+/// The history log is newest-first, so the larger position is the older
+/// commit. A pair that cannot be placed in the log keeps click order, with the
+/// anchor as the base. `None` unless the selection is exactly two commits.
+fn compare_pair_range(
+    repo_state: &RepoState,
+    selected: &[CommitId],
+) -> Option<(CommitId, CommitId)> {
+    let [anchor, clicked] = selected else {
+        return None;
+    };
+    let indexed = &repo_state.history_state.indexed;
+    let positions = indexed
+        .displayed_index
+        .as_ref()
+        .or(indexed.range_index.as_ref())
+        .and_then(|index| {
+            index
+                .position(anchor.as_ref())
+                .zip(index.position(clicked.as_ref()))
+        })
+        .or_else(|| {
+            let Loadable::Ready(page) = &repo_state.history_state.log else {
+                return None;
+            };
+            let position = |id: &CommitId| page.commits.iter().position(|c| c.id == *id);
+            position(anchor).zip(position(clicked))
+        });
+    Some(match positions {
+        Some((anchor_pos, clicked_pos)) if anchor_pos < clicked_pos => {
+            (clicked.clone(), anchor.clone())
+        }
+        _ => (anchor.clone(), clicked.clone()),
+    })
 }
 
 /// Label for a comparison endpoint in the UI/menus: an abbreviated commit id,

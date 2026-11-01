@@ -636,6 +636,158 @@ fn selecting_commits_on_different_branches_shows_no_merged_diff() {
     );
 }
 
+fn range_of(state: &AppState, repo_id: RepoId) -> Option<(CommitId, Option<CommitId>)> {
+    repo(state, repo_id)
+        .history_state
+        .range_selection
+        .as_ref()
+        .map(|range| (range.from.clone(), range.to.clone()))
+}
+
+/// The tip of a branch and a commit merged into it from another branch: not a
+/// first-parent chain, so Ctrl-click shows no merged diff, but Ctrl+Shift-click
+/// compares the two directly — older to newer, whichever is clicked first.
+#[test]
+fn ctrl_shift_click_compares_a_commit_merged_in_from_another_branch_directly() {
+    let repo_id = RepoId(1);
+    for (first, second) in [("tip", "side"), ("side", "tip")] {
+        let mut state = state_with_log(repo_id);
+        let mut merge = commit("merge", "main");
+        merge.parent_ids.push(CommitId("side".into()));
+        state.repos[0].history_state.log = Loadable::Ready(Arc::new(LogPage {
+            commits: vec![
+                commit("tip", "merge"),
+                merge,
+                commit("main", "base"),
+                commit("side", "base"),
+                commit("base", "c0"),
+            ],
+            next_cursor: None,
+        }));
+
+        select(&mut state, repo_id, first, CommitSelectMode::Single);
+        let effects = select(&mut state, repo_id, second, CommitSelectMode::Compare);
+
+        let side = CommitId("side".into());
+        let tip = CommitId("tip".into());
+        assert_eq!(
+            range_of(&state, repo_id),
+            Some((side.clone(), Some(tip.clone()))),
+            "{first} then {second}"
+        );
+        let selection = &repo(&state, repo_id).history_state.multi_selection;
+        assert!(selection.compare_pair);
+        assert_eq!(
+            *selection.commits,
+            vec![CommitId(first.into()), CommitId(second.into())]
+        );
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::LoadRangeFiles { from, to, .. } if *from == side && *to == Some(tip.clone())
+        )));
+    }
+}
+
+/// A pair diffs from the older commit itself, not its parent: `c1..c3` holds
+/// `c2` and `c3`'s changes, where the merged diff of consecutive commits would
+/// start from the oldest one's parent.
+#[test]
+fn ctrl_shift_click_pair_diffs_from_the_older_commit_not_its_parent() {
+    let repo_id = RepoId(1);
+    let mut state = state_with_log(repo_id);
+
+    select(&mut state, repo_id, "c3", CommitSelectMode::Single);
+    select(&mut state, repo_id, "c1", CommitSelectMode::Compare);
+    assert_eq!(
+        range_of(&state, repo_id),
+        Some((CommitId("c1".into()), Some(CommitId("c3".into()))))
+    );
+
+    // The anchor stays on c3, so the next pair replaces c1 rather than
+    // growing the selection, and consecutive commits are compared directly too.
+    select(&mut state, repo_id, "c2", CommitSelectMode::Compare);
+    let history = &repo(&state, repo_id).history_state;
+    assert_eq!(
+        *history.multi_selection.commits,
+        vec![CommitId("c3".into()), CommitId("c2".into())]
+    );
+    assert_eq!(
+        range_of(&state, repo_id),
+        Some((CommitId("c2".into()), Some(CommitId("c3".into()))))
+    );
+}
+
+#[test]
+fn ctrl_shift_click_without_another_commit_acts_as_a_plain_click() {
+    let repo_id = RepoId(1);
+    let mut state = state_with_log(repo_id);
+
+    // Nothing selected yet: there is no anchor to pair with.
+    select(&mut state, repo_id, "c2", CommitSelectMode::Compare);
+    let history = &repo(&state, repo_id).history_state;
+    assert_eq!(
+        *history.multi_selection.commits,
+        vec![CommitId("c2".into())]
+    );
+    assert!(!history.multi_selection.compare_pair);
+    assert_eq!(history.range_selection, None);
+
+    // The anchor itself: a commit is not compared with itself.
+    select(&mut state, repo_id, "c3", CommitSelectMode::Single);
+    select(&mut state, repo_id, "c1", CommitSelectMode::Compare);
+    select(&mut state, repo_id, "c3", CommitSelectMode::Compare);
+    let history = &repo(&state, repo_id).history_state;
+    assert_eq!(
+        *history.multi_selection.commits,
+        vec![CommitId("c3".into())]
+    );
+    assert!(!history.multi_selection.compare_pair);
+    assert_eq!(history.range_selection, None);
+}
+
+#[test]
+fn ctrl_click_after_a_pair_returns_to_the_merged_diff() {
+    let repo_id = RepoId(1);
+    let mut state = state_with_log(repo_id);
+
+    select(&mut state, repo_id, "c3", CommitSelectMode::Single);
+    select(&mut state, repo_id, "c1", CommitSelectMode::Compare);
+    select(&mut state, repo_id, "c2", CommitSelectMode::Toggle);
+
+    let history = &repo(&state, repo_id).history_state;
+    assert_eq!(history.multi_selection.commits.len(), 3);
+    assert!(!history.multi_selection.compare_pair);
+    assert_eq!(
+        range_of(&state, repo_id),
+        Some((CommitId("c0".into()), Some(CommitId("c3".into()))))
+    );
+}
+
+/// Right-click inside the pair moves focus for the menu but keeps the pair and
+/// its direct comparison.
+#[test]
+fn right_click_inside_a_pair_keeps_its_direct_comparison() {
+    let repo_id = RepoId(1);
+    let mut state = state_with_log(repo_id);
+
+    select(&mut state, repo_id, "c3", CommitSelectMode::Single);
+    select(&mut state, repo_id, "c1", CommitSelectMode::Compare);
+    select(
+        &mut state,
+        repo_id,
+        "c3",
+        CommitSelectMode::PreserveIfSelected,
+    );
+
+    let history = &repo(&state, repo_id).history_state;
+    assert!(history.multi_selection.compare_pair);
+    assert_eq!(history.selected_commit, Some(CommitId("c3".into())));
+    assert_eq!(
+        range_of(&state, repo_id),
+        Some((CommitId("c1".into()), Some(CommitId("c3".into()))))
+    );
+}
+
 /// The list landing again can change the selected file's change: deleted on
 /// disk while a working-tree comparison shows it, say. The diff then loads
 /// the one side it has left instead of a patch against nothing.

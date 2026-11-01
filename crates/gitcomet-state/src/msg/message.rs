@@ -200,6 +200,9 @@ pub enum CommitSelectMode {
     Toggle,
     /// Shift click: select the range between the anchor and the clicked commit.
     Range,
+    /// Ctrl/Cmd+Shift click: select the anchor and the clicked commit as a pair
+    /// whose comparison is the direct diff between them, not a merged diff.
+    Compare,
     /// Move focus to the clicked commit while preserving an existing
     /// multi-selection that already contains it (used by right-click so the
     /// details pane follows the menu target); collapses to the clicked commit

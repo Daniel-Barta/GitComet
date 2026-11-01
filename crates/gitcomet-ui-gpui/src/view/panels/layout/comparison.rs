@@ -454,12 +454,19 @@ impl DetailsPaneView {
             );
 
         // A multi-selection without a comparison has no merged diff: only
-        // consecutive commits have one diff holding exactly their changes.
+        // consecutive commits have one diff holding exactly their changes. Any
+        // two commits can still be compared directly as a pair.
         let no_diff_hint = div()
             .debug_selector(|| "multi_commit_no_merged_diff".to_string())
             .text_size(theme.ui_text(14.0))
             .text_color(theme.colors.foreground.secondary)
-            .child("Select consecutive commits to see their combined changes.");
+            .child(if cfg!(target_os = "macos") {
+                "Select consecutive commits to see their combined changes, \
+                 or Cmd+Shift+click to compare two commits."
+            } else {
+                "Select consecutive commits to see their combined changes, \
+                 or Ctrl+Shift+click to compare two commits."
+            });
         let body = self.commit_cards_list(repo_id, count, cx);
 
         div()
@@ -517,9 +524,10 @@ impl DetailsPaneView {
             };
             let card_count = Self::comparison_count(repo);
             // Only a genuine multi-selection is a "merged diff of N commits";
-            // every other flow compares two named points, however many of them
-            // happen to resolve to a card.
-            let is_merged_selection = repo.history_state.multi_selection.is_multi();
+            // every other flow, a Ctrl/Cmd+Shift-click pair included, compares
+            // two named points, however many of them happen to resolve to a card.
+            let selection = &repo.history_state.multi_selection;
+            let is_merged_selection = selection.is_multi() && !selection.compare_pair;
             let files_state = match &repo.history_state.range_files {
                 Loadable::Ready(files) => RangeFilesState::Loaded(files.len()),
                 Loadable::Error(e) => RangeFilesState::Failed(e.clone()),
@@ -533,10 +541,18 @@ impl DetailsPaneView {
         } else {
             "Comparison".into()
         };
-        let subheader: SharedString = if is_merged_selection {
-            format!("Viewing merged diff of {card_count} commits").into()
+        // The selector names which diff the subheader describes, so a test can
+        // tell them apart without reading painted text.
+        let (subheader, subheader_selector): (SharedString, &'static str) = if is_merged_selection {
+            (
+                format!("Viewing merged diff of {card_count} commits").into(),
+                "range_comparison_merged_diff",
+            )
         } else {
-            format!("Viewing diff: {} → {}", range.from_label, range.to_label).into()
+            (
+                format!("Viewing diff: {} → {}", range.from_label, range.to_label).into(),
+                "range_comparison_direct_diff",
+            )
         };
 
         let header = components::content_header_bar(theme, ui_scale)
@@ -696,6 +712,7 @@ impl DetailsPaneView {
                     .p_2()
                     .child(
                         div()
+                            .debug_selector(move || subheader_selector.to_string())
                             .text_size(theme.ui_text(14.0))
                             .text_color(theme.colors.foreground.secondary)
                             .line_clamp(1)

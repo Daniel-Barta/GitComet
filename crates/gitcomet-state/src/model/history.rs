@@ -324,14 +324,18 @@ impl Default for HistoryState {
 /// Multi-selected commits in the history view. `commits` always mirrors the
 /// selection (a plain single-select stores one id here); only `len() > 1`
 /// switches the UI into multi-selection presentation. The anchor is the
-/// origin for shift-click ranges; `anchor_index`/`anchor_log_rev` are a
-/// resolution hint trusted only while the log revision is unchanged.
+/// origin for shift-click ranges and compare pairs; `anchor_index`/
+/// `anchor_log_rev` are a resolution hint trusted only while the log revision
+/// is unchanged.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CommitMultiSelection {
     pub commits: Arc<Vec<CommitId>>,
     pub anchor: Option<CommitId>,
     pub anchor_index: Option<usize>,
     pub anchor_log_rev: Option<u64>,
+    /// `commits` is a Ctrl/Cmd+Shift-click pair, `[anchor, clicked]`, compared
+    /// directly rather than as the merged diff of the selection.
+    pub compare_pair: bool,
 }
 
 impl CommitMultiSelection {
@@ -360,6 +364,7 @@ impl CommitMultiSelection {
                 commit_id
             }
             crate::msg::CommitSelectMode::Toggle => {
+                sel.compare_pair = false;
                 if let Some(ix) = sel.commits.iter().position(|c| *c == commit_id) {
                     Arc::make_mut(&mut sel.commits).remove(ix);
                     let Some(focus) = sel.commits.last().cloned() else {
@@ -409,12 +414,31 @@ impl CommitMultiSelection {
                         } else {
                             entries[a..=b].to_vec()
                         });
+                        sel.compare_pair = false;
                         if sel.anchor.is_none() {
                             sel.anchor = Some(commit_id.clone());
                         }
                         sel.anchor_index = Some(anchor_ix);
                         sel.anchor_log_rev = Some(log_rev);
                     }
+                }
+                commit_id
+            }
+            crate::msg::CommitSelectMode::Compare => {
+                // The anchor stays put, so further Ctrl/Cmd+Shift-clicks compare
+                // it against other commits. Without a second commit there is
+                // nothing to compare: act like a plain click.
+                match sel.anchor.clone().filter(|anchor| *anchor != commit_id) {
+                    Some(anchor) => {
+                        sel.commits = Arc::new(vec![anchor, commit_id.clone()]);
+                        sel.compare_pair = true;
+                    }
+                    None => collapse_multi_selection_to(
+                        &mut sel,
+                        commit_id.clone(),
+                        clicked_index,
+                        log_rev,
+                    ),
                 }
                 commit_id
             }
@@ -448,6 +472,7 @@ fn collapse_multi_selection_to(
     sel.anchor = Some(commit_id);
     sel.anchor_index = clicked_index;
     sel.anchor_log_rev = Some(log_rev);
+    sel.compare_pair = false;
 }
 
 /// Resolves `target`'s index in `entries`, preferring the index hint when it

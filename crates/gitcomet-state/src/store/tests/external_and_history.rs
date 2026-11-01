@@ -1984,6 +1984,7 @@ fn activation_refresh_reloads_the_depth_the_user_paginated_to() {
         anchor: Some(selected.clone()),
         anchor_index: Some(450),
         anchor_log_rev: Some(repo_state.history_state.log_rev),
+        compare_pair: false,
     });
 
     let effects = reduce(
@@ -2522,6 +2523,7 @@ fn log_loaded_reconciles_commit_multi_selection() {
         anchor: Some(CommitId("gone".into())),
         anchor_index: Some(1),
         anchor_log_rev: Some(repo_state.history_state.log_rev),
+        compare_pair: false,
     };
 
     let seq = expect_log_reply(&mut state.repos[0], LogScope::CurrentBranch, None, None);
@@ -2886,6 +2888,7 @@ fn log_loaded_keeps_a_not_yet_paged_selection_when_loading_more() {
         anchor: Some(deep.clone()),
         anchor_index: Some(0),
         anchor_log_rev: Some(repo_state.history_state.log_rev),
+        compare_pair: false,
     };
 
     let seq = expect_log_reply(
@@ -2963,6 +2966,7 @@ fn log_loaded_first_page_keeps_the_commit_a_reveal_is_walking_toward() {
         anchor: Some(target.clone()),
         anchor_index: Some(0),
         anchor_log_rev: Some(repo_state.history_state.log_rev),
+        compare_pair: false,
     };
 
     let seq = expect_log_reply(&mut state.repos[0], LogScope::CurrentBranch, None, None);

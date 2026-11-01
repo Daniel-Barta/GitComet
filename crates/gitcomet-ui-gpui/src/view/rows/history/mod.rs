@@ -650,12 +650,12 @@ fn history_table_row(
             controls::ControlActivation::Composite,
             cx.listener(move |this, e: &ClickEvent, _w, cx| {
                 let modifiers = e.modifiers();
-                let mode = if modifiers.shift {
-                    CommitSelectMode::Range
-                } else if modifiers.secondary() || modifiers.control || modifiers.platform {
-                    CommitSelectMode::Toggle
-                } else {
-                    CommitSelectMode::Single
+                let toggle = modifiers.secondary() || modifiers.control || modifiers.platform;
+                let mode = match (modifiers.shift, toggle) {
+                    (true, true) => CommitSelectMode::Compare,
+                    (true, false) => CommitSelectMode::Range,
+                    (false, true) => CommitSelectMode::Toggle,
+                    (false, false) => CommitSelectMode::Single,
                 };
                 this.cancel_history_find_navigation();
                 this.select_history_commit(repo_id, commit_id.clone(), mode, Some(graph_row_ix));

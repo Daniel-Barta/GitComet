@@ -2910,6 +2910,46 @@ fn history_find_toggle_deselect_uses_the_remaining_focus(cx: &mut gpui::TestAppC
     wait_for_selection(cx, &view, &store, "bbbb1111");
 }
 
+/// Ctrl+Shift-click pairs the anchor with the clicked commit and compares the
+/// two directly, where Ctrl-click would grow a merged-diff selection.
+#[gpui::test]
+fn history_ctrl_shift_click_compares_the_anchor_with_the_clicked_commit(
+    cx: &mut gpui::TestAppContext,
+) {
+    let tip = CommitId("aaaa0000".into());
+    let older = CommitId("cccc2222".into());
+    let mut repo = find_fixture_repo(find_fixture_commits());
+    repo.history_state.selected_commit = Some(tip.clone());
+    repo.history_state.multi_selection.commits = Arc::new(vec![tip.clone()]);
+    repo.history_state.multi_selection.anchor = Some(tip.clone());
+    let (view, store, cx) = mount_find_fixture(cx, repo);
+    let at = cx.debug_bounds("history_row_2").unwrap().center();
+    cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+    cx.simulate_click(
+        at,
+        gpui::Modifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        },
+    );
+    wait_for_selection(cx, &view, &store, "cccc2222");
+
+    let state = store.snapshot();
+    let history = &state.repos[0].history_state;
+    assert!(history.multi_selection.compare_pair);
+    assert_eq!(
+        *history.multi_selection.commits,
+        vec![tip.clone(), older.clone()]
+    );
+    let range = history
+        .range_selection
+        .as_ref()
+        .expect("a pair opens a comparison");
+    assert_eq!(range.from, older);
+    assert_eq!(range.to, Some(tip));
+}
+
 #[gpui::test]
 fn history_find_stash_details_highlight_only_the_row_summary(cx: &mut gpui::TestAppContext) {
     let id = "abab7777";

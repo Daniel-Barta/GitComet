@@ -832,6 +832,42 @@ mod tests {
     }
 
     #[test]
+    fn a_ctrl_shift_click_pair_compares_the_older_commit_with_the_newer() {
+        let (mut state, index) = fixture();
+        reduce(
+            &mut state,
+            Event::Publish {
+                repo_id: RepoId(1),
+                index: index.clone(),
+            },
+        );
+        let projection = HistoryProjection::new(index.clone(), vec![]);
+        let select = |state: &mut AppState, row: usize, mode| {
+            reduce(
+                state,
+                Event::Select {
+                    request_id: None,
+                    repo_id: RepoId(1),
+                    projection: projection.clone(),
+                    commit_id: index.commit_id(row).unwrap(),
+                    mode,
+                },
+            );
+        };
+
+        // Newer first: the clicked commit is the older side.
+        select(&mut state, 10_000, CommitSelectMode::Single);
+        select(&mut state, 10_002, CommitSelectMode::Compare);
+        let range = state.repos[0]
+            .history_state
+            .range_selection
+            .as_ref()
+            .expect("a pair opens a comparison despite the gap");
+        assert_eq!(range.from, index.commit_id(10_002).unwrap());
+        assert_eq!(range.to, index.commit_id(10_000));
+    }
+
+    #[test]
     fn query_change_invalidates_generations_even_when_switching_back() {
         let (mut state, _) = fixture();
         state.repos[0].history_state.indexed.index = None;
