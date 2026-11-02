@@ -1949,7 +1949,7 @@ impl SettingsWindowView {
                     .text_size(theme.ui_text(12.0))
                     .text_color(theme.colors.foreground.secondary)
                     .child(
-                        "Fetch All unlinks local branches whose fetched upstream was deleted, but preserves local branches and tags. Pull fetches only its upstream; Pull into current fetches only the selected branch. Neither prunes remote branches.",
+                        "Fetch All unlinks local branches whose fetched upstream was deleted, but preserves local branches and tags. Pull (default) fetches every branch of its upstream's remote, the other Pull modes only the upstream; Pull into current fetches only the selected branch. Neither prunes remote branches.",
                     ),
             )
             .child(

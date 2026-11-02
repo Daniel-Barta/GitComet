@@ -86,6 +86,62 @@ fn pull_fetches_only_the_configured_upstream_without_pruning() {
     assert_eq!(fetched.lines().count(), 1, "{fetched}");
 }
 
+#[test]
+fn default_pull_updates_every_remote_tracking_branch_but_merges_only_the_upstream() {
+    let _guard = remote_management_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let (remote, work) = init_work_repo_with_remote(dir.path(), "origin");
+    let writer = dir.path().join("writer");
+    run_git(
+        dir.path(),
+        &["clone", "-q", &git_remote_url(&remote), "writer"],
+    );
+    configure_repo_with_user(&writer);
+    run_git(&writer, &["checkout", "-q", "-b", "unrelated"]);
+    fs::write(writer.join("unrelated.txt"), "unrelated object\n").unwrap();
+    run_git(&writer, &["add", "unrelated.txt"]);
+    run_git(&writer, &["commit", "-q", "-m", "unrelated"]);
+    run_git(&writer, &["push", "-q", "origin", "unrelated"]);
+    let unrelated = run_git_capture(&writer, &["rev-parse", "HEAD"]);
+    run_git(&writer, &["checkout", "-q", "main"]);
+    fs::write(writer.join("upstream.txt"), "upstream update\n").unwrap();
+    run_git(&writer, &["add", "upstream.txt"]);
+    run_git(&writer, &["commit", "-q", "-m", "upstream"]);
+    run_git(&writer, &["push", "-q", "origin", "main"]);
+    let upstream = run_git_capture(&writer, &["rev-parse", "HEAD"]);
+    run_git(&work, &["config", "fetch.prune", "true"]);
+    run_git(&work, &["config", "fetch.all", "true"]);
+    run_git(
+        &work,
+        &["remote", "add", "unavailable", "/missing-pull-remote.git"],
+    );
+    run_git(&work, &["update-ref", "refs/remotes/origin/stale", "HEAD"]);
+
+    let output = GixBackend
+        .open(&work)
+        .unwrap()
+        .pull(PullMode::Default)
+        .unwrap();
+
+    assert!(
+        output
+            .command
+            .ends_with("pull --progress --ff --no-prune -- origin"),
+        "{}",
+        output.command
+    );
+    assert_eq!(run_git_capture(&work, &["rev-parse", "HEAD"]), upstream);
+    assert_eq!(
+        run_git_capture(&work, &["rev-parse", "refs/remotes/origin/main"]),
+        upstream
+    );
+    assert_eq!(
+        run_git_capture(&work, &["rev-parse", "refs/remotes/origin/unrelated"]),
+        unrelated
+    );
+    assert!(ref_exists(&work, "refs/remotes/origin/stale"));
+}
+
 fn advance_main(root: &Path, remote: &Path) -> String {
     let writer = root.join("writer");
     run_git(root, &["clone", "-q", &git_remote_url(remote), "writer"]);

@@ -2707,7 +2707,7 @@ fn pull_uses_one_explicit_source_and_disables_pruning() {
     let backend = GixBackend;
     let opened = backend.open(&work_repo).expect("open work repo");
     let output = opened
-        .pull(PullMode::Default)
+        .pull(PullMode::FastForwardIfPossible)
         .expect("pull without pruning");
 
     assert!(
