@@ -530,6 +530,14 @@ pub enum Msg {
         request_id: Option<u64>,
         repo_id: RepoId,
     },
+    /// Ctrl/Cmd+Shift click on History's "Uncommitted changes" row: compare the
+    /// anchor commit (else the selected one) with the working tree, as
+    /// `CompareWithWorkingTree` does. Without a commit to pair it selects the
+    /// row, as `ClearCommitSelection` does.
+    CompareAnchorWithWorkingTree {
+        request_id: Option<u64>,
+        repo_id: RepoId,
+    },
     /// Compare two points (commits, or branch/tag tips resolved to commit ids).
     /// `from` is the base/older side. Loads the changed-file list and drives the
     /// whole-range patch into the diff pane.

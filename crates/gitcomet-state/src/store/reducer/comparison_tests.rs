@@ -788,6 +788,163 @@ fn right_click_inside_a_pair_keeps_its_direct_comparison() {
     );
 }
 
+/// `state_with_log`, with an uncommitted change, so History shows its
+/// "Uncommitted changes" row.
+fn state_with_uncommitted_changes(repo_id: RepoId) -> AppState {
+    let mut state = state_with_log(repo_id);
+    state.repos[0].worktree_status =
+        Loadable::Ready(Arc::new(vec![gitcomet_core::domain::FileStatus {
+            path: "a.txt".into(),
+            kind: FileStatusKind::Modified,
+            conflict: None,
+        }]));
+    state
+}
+
+fn compare_anchor_with_working_tree(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> {
+    dispatch_effects(
+        state,
+        Msg::CompareAnchorWithWorkingTree {
+            request_id: None,
+            repo_id,
+        },
+    )
+}
+
+/// What "Compare with working tree" from the commit menu shows for `from`, so
+/// a Ctrl/Cmd+Shift pair can be checked against it.
+fn menu_working_tree_comparison(from: &str) -> crate::model::RangeSelection {
+    let repo_id = RepoId(1);
+    let mut state = state_with_uncommitted_changes(repo_id);
+    dispatch_effects(
+        &mut state,
+        Msg::CompareWithWorkingTree {
+            repo_id,
+            from: CommitId(from.into()),
+            from_label: from.into(),
+        },
+    );
+    repo(&state, repo_id)
+        .history_state
+        .range_selection
+        .clone()
+        .unwrap()
+}
+
+/// Ctrl/Cmd+Shift-click on the "Uncommitted changes" row pairs the anchor
+/// commit with the working tree: the same comparison as the commit menu's
+/// "Compare with working tree", with the commit and the row both selected.
+#[test]
+fn ctrl_shift_click_on_uncommitted_changes_compares_the_anchor_with_the_working_tree() {
+    let repo_id = RepoId(1);
+    let mut state = state_with_uncommitted_changes(repo_id);
+    let c2 = CommitId("c2".into());
+
+    select(&mut state, repo_id, "c2", CommitSelectMode::Single);
+    let effects = compare_anchor_with_working_tree(&mut state, repo_id);
+
+    let history = &repo(&state, repo_id).history_state;
+    let range = history.range_selection.clone().expect("a comparison");
+    let menu = menu_working_tree_comparison("c2");
+    assert_eq!(range.from, c2);
+    assert_eq!(range.to, None);
+    assert_eq!(range.to_label, menu.to_label);
+    assert_eq!(range.options, menu.options, "the menu's file list");
+    assert!(history.multi_selection.working_tree);
+    assert_eq!(*history.multi_selection.commits, vec![c2.clone()]);
+    assert_eq!(history.selected_commit, Some(c2.clone()));
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::LoadRangeFiles { from, to: None, options, .. }
+            if *from == c2 && *options == menu.options
+    )));
+
+    // The anchor stays on c2: Ctrl/Cmd+Shift on another commit pairs the two
+    // commits again.
+    select(&mut state, repo_id, "c3", CommitSelectMode::Compare);
+    let history = &repo(&state, repo_id).history_state;
+    assert!(!history.multi_selection.working_tree);
+    assert_eq!(
+        range_of(&state, repo_id),
+        Some((c2.clone(), Some(CommitId("c3".into()))))
+    );
+}
+
+/// With the "Uncommitted changes" row selected — as it is when nothing else is
+/// — Ctrl/Cmd+Shift on a commit pairs it with the working tree, and the row
+/// stays the anchor for further pairs.
+#[test]
+fn ctrl_shift_click_on_a_commit_pairs_it_with_selected_uncommitted_changes() {
+    let repo_id = RepoId(1);
+    let mut state = state_with_uncommitted_changes(repo_id);
+
+    for id in ["c1", "c3"] {
+        select(&mut state, repo_id, id, CommitSelectMode::Compare);
+        let history = &repo(&state, repo_id).history_state;
+        assert_eq!(range_of(&state, repo_id), Some((CommitId(id.into()), None)));
+        assert!(history.multi_selection.working_tree);
+        assert_eq!(history.multi_selection.anchor, None);
+        assert_eq!(*history.multi_selection.commits, vec![CommitId(id.into())]);
+        assert_eq!(history.selected_commit, Some(CommitId(id.into())));
+        assert_eq!(
+            history.range_selection.as_ref().unwrap().options,
+            menu_working_tree_comparison(id).options
+        );
+    }
+
+    // A plain click leaves the pair.
+    select(&mut state, repo_id, "c2", CommitSelectMode::Single);
+    let history = &repo(&state, repo_id).history_state;
+    assert!(!history.multi_selection.working_tree);
+    assert_eq!(history.range_selection, None);
+}
+
+/// Without uncommitted changes there is no row to pair with: nothing selected
+/// falls back to HEAD, and Ctrl/Cmd+Shift acts as a plain click, as before.
+#[test]
+fn ctrl_shift_click_without_uncommitted_changes_acts_as_a_plain_click() {
+    let repo_id = RepoId(1);
+    let mut state = state_with_log(repo_id);
+
+    select(&mut state, repo_id, "c2", CommitSelectMode::Compare);
+    let history = &repo(&state, repo_id).history_state;
+    assert!(!history.multi_selection.working_tree);
+    assert_eq!(history.range_selection, None);
+}
+
+/// Nothing to pair with the working tree: the click selects the row.
+#[test]
+fn ctrl_shift_click_on_uncommitted_changes_without_a_commit_selects_the_row() {
+    let repo_id = RepoId(1);
+    let mut state = state_with_uncommitted_changes(repo_id);
+
+    compare_anchor_with_working_tree(&mut state, repo_id);
+    let history = &repo(&state, repo_id).history_state;
+    assert_eq!(history.selected_commit, None);
+    assert_eq!(history.range_selection, None);
+    assert!(repo(&state, repo_id).uncommitted_changes_row_selected());
+}
+
+/// Ctrl-click leaves a working-tree pair for the ordinary multi-selection.
+#[test]
+fn ctrl_click_after_a_working_tree_pair_leaves_it() {
+    let repo_id = RepoId(1);
+    let mut state = state_with_uncommitted_changes(repo_id);
+
+    select(&mut state, repo_id, "c3", CommitSelectMode::Compare);
+    select(&mut state, repo_id, "c2", CommitSelectMode::Toggle);
+    let history = &repo(&state, repo_id).history_state;
+    assert!(!history.multi_selection.working_tree);
+    assert_eq!(
+        *history.multi_selection.commits,
+        vec![CommitId("c3".into()), CommitId("c2".into())]
+    );
+    assert_eq!(
+        range_of(&state, repo_id),
+        Some((CommitId("c1".into()), Some(CommitId("c3".into()))))
+    );
+}
+
 /// The list landing again can change the selected file's change: deleted on
 /// disk while a working-tree comparison shows it, say. The diff then loads
 /// the one side it has left instead of a patch against nothing.

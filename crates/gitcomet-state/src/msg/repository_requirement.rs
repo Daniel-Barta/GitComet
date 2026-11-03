@@ -27,6 +27,7 @@ impl Msg {
             | Self::Commit { repo_id, .. }
             | Self::CommitAmend { repo_id, .. }
             | Self::CompareWithWorkingTree { repo_id, .. }
+            | Self::CompareAnchorWithWorkingTree { repo_id, .. }
             | Self::ConflictAddManualAlignment { repo_id, .. }
             | Self::ConflictApplyAutosolve { repo_id, .. }
             | Self::ConflictApplyBulkChoice { repo_id, .. }

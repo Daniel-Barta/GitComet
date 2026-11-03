@@ -1273,6 +1273,7 @@ fn set_active_repo_resets_the_activated_tabs_history_selection_only_on_change() 
         anchor_index: Some(0),
         anchor_log_rev: Some(target.history_state.log_rev),
         compare_pair: false,
+        working_tree: false,
     };
     target.history_state.range_selection = Some(RangeSelection {
         from: CommitId("older".into()),

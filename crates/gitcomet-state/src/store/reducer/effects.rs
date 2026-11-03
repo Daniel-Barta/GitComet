@@ -393,13 +393,21 @@ pub(super) fn select_commit_multi(
         return Vec::new();
     };
 
-    let (sel, focus) = repo_state.history_state.multi_selection.select(
-        commit_id,
-        mode,
-        clicked_index,
-        visible_order,
-        repo_state.history_state.log_rev,
-    );
+    // With the "Uncommitted changes" row selected, a Ctrl/Cmd+Shift-click pairs
+    // the commit with the working tree.
+    let working_tree_anchor = (mode == CommitSelectMode::Compare
+        && repo_state.uncommitted_changes_row_selected())
+    .then(CommitMultiSelection::working_tree_anchor);
+    let (sel, focus) = working_tree_anchor
+        .as_ref()
+        .unwrap_or(&repo_state.history_state.multi_selection)
+        .select(
+            commit_id,
+            mode,
+            clicked_index,
+            visible_order,
+            repo_state.history_state.log_rev,
+        );
     let Some(focus) = focus else {
         repo_state.set_selected_commit(None);
         repo_state.set_commit_details(Loadable::NotLoaded);
@@ -411,18 +419,22 @@ pub(super) fn select_commit_multi(
     // Two or more consecutive commits enter "compare" mode: the details pane
     // shows the merged diff of the whole selection — every selected commit's
     // own changes, combined — instead of a plain list. A Ctrl/Cmd+Shift-click
-    // pair shows the direct diff between its two commits instead. A single
-    // commit, or a selection with no such diff (see `merged_selection_range`),
-    // falls back to the single/multi-list behavior below.
+    // pair shows the direct diff between its two commits, or between its
+    // commit and the working tree, instead. A single commit, or a selection
+    // with no such diff (see `merged_selection_range`), falls back to the
+    // single/multi-list behavior below.
     let range_pair = {
         let selection = &repo_state.history_state.multi_selection;
         let selected = &selection.commits;
-        if selection.compare_pair {
-            compare_pair_range(repo_state, selected)
+        if selection.working_tree {
+            selected.first().map(|commit| (commit.clone(), None))
+        } else if selection.compare_pair {
+            compare_pair_range(repo_state, selected).map(|(from, to)| (from, Some(to)))
         } else {
             (selected.len() >= 2)
                 .then(|| merged_selection_range(repo_state, selected))
                 .flatten()
+                .map(|(from, to)| (from, Some(to)))
         }
     };
 
@@ -433,17 +445,7 @@ pub(super) fn select_commit_multi(
             // over the details pane, so a single-commit detail load is wasted.
             // Leaving comparison mode is what reconciles the details pane again.
             repo_state.set_selected_commit(Some(focus));
-            let from_label = range_endpoint_label(&from);
-            let to_label = range_endpoint_label(&to);
-            compare_range(
-                state,
-                repo_id,
-                from,
-                Some(to),
-                from_label,
-                to_label,
-                ComparisonSource::MultiSelection,
-            )
+            compare_selection(state, repo_id, from, to)
         }
         None => {
             let left_comparison = repo_state.clear_range_comparison();
@@ -619,6 +621,9 @@ fn compare_pair_range(
     })
 }
 
+/// The working tree's name as a comparison endpoint.
+pub(super) const WORKING_TREE_LABEL: &str = "Working tree";
+
 /// Label for a comparison endpoint in the UI/menus: an abbreviated commit id,
 /// or a name for the empty-tree base, whose sha would be meaningless on screen.
 fn range_endpoint_label(id: &CommitId) -> String {
@@ -627,6 +632,56 @@ fn range_endpoint_label(id: &CommitId) -> String {
         return "start of history".to_string();
     }
     full.get(..8).unwrap_or(full).to_string()
+}
+
+/// Compare a history selection's endpoints. A `to` of `None` is the working
+/// tree, compared exactly as the commit menu's "Compare with working tree"
+/// does, so both list the same files.
+fn compare_selection(
+    state: &mut AppState,
+    repo_id: RepoId,
+    from: CommitId,
+    to: Option<CommitId>,
+) -> Vec<Effect> {
+    let from_label = range_endpoint_label(&from);
+    let to_label = match &to {
+        Some(to) => range_endpoint_label(to),
+        None => WORKING_TREE_LABEL.to_string(),
+    };
+    compare_range(
+        state,
+        repo_id,
+        from,
+        to,
+        from_label,
+        to_label,
+        ComparisonSource::MultiSelection,
+    )
+}
+
+/// Ctrl/Cmd+Shift-click on the "Uncommitted changes" row: compare the anchor
+/// commit, else the selected one, with the working tree. Without a commit to
+/// pair, the click selects the row like a plain one.
+pub(super) fn compare_anchor_with_working_tree(
+    state: &mut AppState,
+    repo_id: RepoId,
+) -> Vec<Effect> {
+    let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
+        return Vec::new();
+    };
+    let history = &repo_state.history_state;
+    let Some(sel) = history
+        .multi_selection
+        .pair_with_working_tree(history.selected_commit.as_ref())
+    else {
+        return clear_commit_selection(state, repo_id);
+    };
+    let commit = sel.commits[0].clone();
+    repo_state.set_commit_multi_selection(sel);
+    // Selected but not loaded: the comparison takes over the details pane, as
+    // it does for a pair of commits.
+    repo_state.set_selected_commit(Some(commit.clone()));
+    compare_selection(state, repo_id, commit, None)
 }
 
 /// Where a comparison came from, which decides whether the multi-selection

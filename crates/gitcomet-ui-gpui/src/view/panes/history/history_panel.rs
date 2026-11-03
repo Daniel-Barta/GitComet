@@ -639,6 +639,17 @@ impl HistoryView {
             return;
         };
         let pending = self.pending_history_selections.back();
+        // With the "Uncommitted changes" row selected, a Ctrl/Cmd+Shift-click
+        // pairs the commit with the working tree; the reducer decides the same.
+        let working_tree_selected = pending.map_or_else(
+            || repo.uncommitted_changes_row_selected(),
+            |pending| {
+                matches!(
+                    pending.selection,
+                    super::HistoryPrimarySelection::WorkingTree
+                )
+            },
+        );
         let previous_anchor = pending.map_or(
             repo.history_state.multi_selection.anchor.as_ref(),
             |pending| pending.multi_selection.anchor(),
@@ -672,6 +683,8 @@ impl HistoryView {
         } else {
             let previous = if mode == CommitSelectMode::Single {
                 Default::default()
+            } else if mode == CommitSelectMode::Compare && working_tree_selected {
+                gitcomet_state::model::CommitMultiSelection::working_tree_anchor()
             } else {
                 pending.map_or_else(
                     || repo.history_state.multi_selection.clone(),
@@ -717,6 +730,51 @@ impl HistoryView {
                 visible_order,
             });
         }
+    }
+
+    /// Ctrl/Cmd+Shift-click on the "Uncommitted changes" row: compare the
+    /// anchor commit (else the selected one) with the working tree. Without a
+    /// commit to pair it is a plain click on the row.
+    pub(in crate::view) fn compare_anchor_with_working_tree(
+        &mut self,
+        repo_id: RepoId,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(repo) = self.active_repo().filter(|repo| repo.id == repo_id) else {
+            return;
+        };
+        let pair = match self.pending_history_selections.back() {
+            Some(pending) => {
+                let selected = match &pending.selection {
+                    super::HistoryPrimarySelection::Commit(commit_id) => Some(commit_id),
+                    _ => None,
+                };
+                pending
+                    .multi_selection
+                    .materialize()
+                    .pair_with_working_tree(selected)
+            }
+            None => repo
+                .history_state
+                .multi_selection
+                .pair_with_working_tree(repo.history_state.selected_commit.as_ref()),
+        };
+        let Some(pair) = pair else {
+            self.select_working_tree_summary_row(repo_id, cx);
+            return;
+        };
+        self.cancel_history_find_navigation();
+        let selection = super::HistoryPrimarySelection::Commit(pair.commits[0].clone());
+        let request_id = self.note_history_selection_with_members(
+            repo_id,
+            selection,
+            super::PendingHistoryMembers::Commits(pair),
+        );
+        self.store.dispatch(Msg::CompareAnchorWithWorkingTree {
+            request_id: Some(request_id),
+            repo_id,
+        });
+        cx.notify();
     }
 
     pub(super) fn history_navigation_selection(

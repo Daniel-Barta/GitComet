@@ -168,10 +168,11 @@ impl HistoryView {
                     }
 
                     if matches!(row, HistoryListRow::WorkingTreeSummary) {
+                        // Also selected as one end of a Ctrl/Cmd+Shift-click pair.
                         let selected = matches!(
                             &primary_selection,
                             Some(super::HistoryPrimarySelection::WorkingTree)
-                        );
+                        ) || repo.history_state.multi_selection.working_tree;
                         return Some(working_tree_summary_history_row(
                             theme,
                             ui_scale,
@@ -1211,6 +1212,7 @@ fn working_tree_summary_history_row(
     // the flexible summary is the only cell allowed to absorb width pressure.
     let row = div()
         .id(("history_worktree_summary", repo_id.0))
+        .debug_selector(|| "history_working_tree_summary_row".to_string())
         .when(find_dimmed, |row| row.opacity(HISTORY_FIND_DIMMED_OPACITY))
         .h(history_row_height(ui_scale))
         .flex()
@@ -1297,8 +1299,16 @@ fn working_tree_summary_history_row(
         .on_activate(
             false,
             controls::ControlActivation::Composite,
-            cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                this.select_working_tree_summary_row(repo_id, cx);
+            cx.listener(move |this, e: &ClickEvent, _w, cx| {
+                // Ctrl/Cmd+Shift pairs the anchor commit with the working tree,
+                // as it pairs two commits.
+                let modifiers = e.modifiers();
+                let toggle = modifiers.secondary() || modifiers.control || modifiers.platform;
+                if modifiers.shift && toggle {
+                    this.compare_anchor_with_working_tree(repo_id, cx);
+                } else {
+                    this.select_working_tree_summary_row(repo_id, cx);
+                }
             }),
         );
 
