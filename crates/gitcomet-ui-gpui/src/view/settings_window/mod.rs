@@ -393,6 +393,7 @@ enum SettingsCategory {
     LargeFiles,
     Tags,
     Maintenance,
+    Hooks,
     GitExecutable,
     Environment,
     Links,
@@ -413,6 +414,7 @@ impl SettingsCategory {
         SettingsCategory::LargeFiles,
         SettingsCategory::Tags,
         SettingsCategory::Maintenance,
+        SettingsCategory::Hooks,
         SettingsCategory::GitExecutable,
         SettingsCategory::Environment,
         SettingsCategory::Links,
@@ -433,6 +435,7 @@ impl SettingsCategory {
             Self::LargeFiles => "Large files",
             Self::Tags => "Tags",
             Self::Maintenance => "Maintenance",
+            Self::Hooks => "Git hooks",
             Self::GitExecutable => "Executables",
             Self::Environment => "Environment",
             Self::Links => "Links",
@@ -454,6 +457,7 @@ impl SettingsCategory {
             Self::LargeFiles => "icons/disk.svg",
             Self::Tags => "icons/tag.svg",
             Self::Maintenance => "icons/broom.svg",
+            Self::Hooks => "icons/lightning.svg",
             Self::GitExecutable => "icons/git_branch.svg",
             Self::Environment => "icons/computer.svg",
             Self::Links => "icons/link.svg",
@@ -475,6 +479,7 @@ impl SettingsCategory {
             Self::LargeFiles => "settings_window_nav_large_files",
             Self::Tags => "settings_window_nav_tags",
             Self::Maintenance => "settings_window_nav_maintenance",
+            Self::Hooks => "settings_window_nav_hooks",
             Self::GitExecutable => "settings_window_nav_git_executable",
             Self::Environment => "settings_window_nav_environment",
             Self::Links => "settings_window_nav_links",
@@ -531,6 +536,10 @@ impl SettingsCategory {
             Self::Maintenance => {
                 "maintenance recommend repository gc garbage collection repack pack packs \
                  loose objects optimize optimise housekeeping"
+            }
+            Self::Hooks => {
+                "git hooks hook output window activity open automatically popup dialog \
+                 pull commit post-merge post-checkout pre-commit fails failure notice"
             }
             Self::GitExecutable => {
                 "executables git executable custom path system path version gpg gnupg \
@@ -701,6 +710,7 @@ pub(crate) struct SettingsWindowView {
     hidden_ref_prefix_error: Option<gitcomet_state::model::HiddenRefPrefixError>,
     _hidden_ref_prefix_subscriptions: Vec<gpui::Subscription>,
     recommend_repo_maintenance: bool,
+    hook_output_window: HookOutputWindow,
     current_view: SettingsView,
     selected_category: SettingsCategory,
     /// Extension pages, fixed when the window opens; empty without extensions.
@@ -1138,6 +1148,7 @@ impl SettingsWindowView {
         let large_file_settings = ui_preferences.large_files;
         let hidden_ref_settings = ui_preferences.history.hidden_ref_settings.clone();
         let recommend_repo_maintenance = ui_preferences.maintenance.recommend;
+        let hook_output_window = ui_preferences.hooks.output_window;
         let external_editor_setting = initial_external_editor_setting(&ui_session);
         // Only the saved editor's entry is needed to render the summary row;
         // installed editors are detected once the row is expanded, see
@@ -1560,6 +1571,7 @@ impl SettingsWindowView {
             hidden_ref_prefix_error: None,
             _hidden_ref_prefix_subscriptions: hidden_ref_prefix_subscriptions,
             recommend_repo_maintenance,
+            hook_output_window,
             current_view: SettingsView::Root,
             selected_category: SettingsCategory::General,
             extension_pages: extension_pages::extension_pages(cx),

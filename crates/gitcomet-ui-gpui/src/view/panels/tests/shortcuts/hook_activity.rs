@@ -1663,3 +1663,123 @@ fn maintenance_progress_card_explains_the_wait() {
     assert!(progress.explanation().is_some());
     assert_eq!(progress.percent_label().as_deref(), Some("~46%"));
 }
+
+/// A pull running a `post-merge` hook, the case that interrupted pulls.
+fn running_post_merge_pull(operation_id: u64) -> GitHookOperation {
+    let mut operation = running_hook_activity(operation_id);
+    operation.label = "Pull".to_string();
+    operation.hooks[0].name = "post-merge".to_string();
+    operation
+}
+
+/// The pull finished; its `post-merge` hook passed or failed.
+fn finish_post_merge_pull(operation: &mut GitHookOperation, hook_passed: bool) {
+    operation.status = if hook_passed {
+        GitHookOperationStatus::Succeeded
+    } else {
+        GitHookOperationStatus::SucceededWithHookFailure
+    };
+    operation.duration = Some(Duration::from_secs(1));
+    let hook = &mut operation.hooks[0];
+    hook.status = if hook_passed {
+        GitHookRunStatus::Succeeded
+    } else {
+        GitHookRunStatus::Failed
+    };
+    hook.exit_code = Some(if hook_passed { 0 } else { 1 });
+    hook.duration = Some(Duration::from_secs(1));
+}
+
+/// Runs a pull whose `post-merge` hook passes or fails under `mode`, and
+/// reports whether the output window was open while the hook ran, whether it
+/// was open afterwards, and how many completion notices the repo got.
+fn pull_with_post_merge_hook(
+    cx: &mut gpui::TestAppContext,
+    mode: crate::view::HookOutputWindow,
+    hook_passed: bool,
+    repo_number: u64,
+) -> (bool, bool, usize) {
+    let (store, events) = AppStore::new_test(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+    cx.update(|_window, app| {
+        view.update(app, |view, cx| {
+            view.update_ui_preferences(cx, move |preferences| {
+                preferences.hooks.output_window = mode;
+            });
+        });
+    });
+    let repo_id = RepoId(repo_number);
+    let mut repo = shortcut_fixture_repo(
+        repo_id,
+        &std::env::temp_dir().join(format!(
+            "gitcomet_ui_test_{}_hook_output_{repo_number}",
+            std::process::id()
+        )),
+        &CommitId(format!("{repo_number:016}").into()),
+    );
+    apply_state(cx, &view, app_state_with_active_repo(repo.clone()));
+
+    repo.feedback_mut()
+        .hook_activity
+        .push(running_post_merge_pull(repo_number));
+    repo.feedback_mut().hook_activity_rev = 1;
+    apply_state(cx, &view, app_state_with_active_repo(repo.clone()));
+    draw_and_drain_test_window(cx);
+    let open_while_running = cx.debug_bounds("hook_activity_panel").is_some();
+    if !open_while_running {
+        assert!(
+            cx.debug_bounds("hook_progress_toast").is_some(),
+            "without the output window the progress notice reports the hook"
+        );
+    }
+
+    finish_post_merge_pull(&mut repo.feedback_mut().hook_activity[0], hook_passed);
+    repo.feedback_mut().hook_activity_rev = 2;
+    apply_state(cx, &view, app_state_with_active_repo(repo));
+    draw_and_drain_test_window(cx);
+    let open_after = cx.debug_bounds("hook_activity_panel").is_some();
+    let notices = cx.update(|_window, app| {
+        view.read(app)
+            .toast_host
+            .read(app)
+            .hook_activity_notice_count_for_test(repo_id)
+    });
+    (open_while_running, open_after, notices)
+}
+
+#[gpui::test]
+fn hook_output_window_opens_as_a_hook_runs_by_default(cx: &mut gpui::TestAppContext) {
+    let (open_while_running, open_after, _) =
+        pull_with_post_merge_hook(cx, crate::view::HookOutputWindow::Always, true, 760);
+    assert!(open_while_running, "upstream behavior: the output opens");
+    assert!(open_after);
+}
+
+#[gpui::test]
+fn hook_output_window_on_failure_stays_closed_for_a_passing_hook(cx: &mut gpui::TestAppContext) {
+    let (open_while_running, open_after, notices) =
+        pull_with_post_merge_hook(cx, crate::view::HookOutputWindow::OnFailure, true, 761);
+    assert!(!open_while_running);
+    assert!(!open_after);
+    assert_eq!(notices, 1, "the success notice still reports the hook");
+}
+
+#[gpui::test]
+fn hook_output_window_on_failure_opens_for_a_failed_hook(cx: &mut gpui::TestAppContext) {
+    let (open_while_running, open_after, notices) =
+        pull_with_post_merge_hook(cx, crate::view::HookOutputWindow::OnFailure, false, 762);
+    assert!(!open_while_running);
+    assert!(open_after, "a failed hook opens its output");
+    assert_eq!(notices, 0, "the open output replaces the failure notice");
+}
+
+#[gpui::test]
+fn hook_output_window_never_leaves_a_failure_to_its_notice(cx: &mut gpui::TestAppContext) {
+    let (open_while_running, open_after, notices) =
+        pull_with_post_merge_hook(cx, crate::view::HookOutputWindow::Never, false, 763);
+    assert!(!open_while_running);
+    assert!(!open_after);
+    assert_eq!(notices, 1, "the failure notice offers the output");
+}

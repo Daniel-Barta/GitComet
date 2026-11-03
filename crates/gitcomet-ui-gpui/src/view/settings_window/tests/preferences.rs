@@ -649,6 +649,54 @@ fn auto_save_file_edits_toggle_reaches_the_main_window(cx: &mut gpui::TestAppCon
     });
 }
 
+/// The Git hooks page's choice reaches the main window, which decides when
+/// the hook output window opens.
+#[gpui::test]
+fn hook_output_window_choice_reaches_the_main_window(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new_test(std::sync::Arc::new(TestBackend));
+    let (main_view, cx) =
+        cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+        open_settings_window(app);
+    });
+    cx.run_until_parked();
+    let settings_window = cx.update(|_window, app| {
+        app.windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<SettingsWindowView>())
+            .expect("settings window should be open")
+    });
+    let main_window_mode = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|_window, app| {
+            main_view
+                .read(app)
+                .ui_model
+                .read(app)
+                .preferences
+                .hooks
+                .output_window
+        })
+    };
+    assert_eq!(main_window_mode(cx), HookOutputWindow::Always);
+
+    cx.update(|_window, app| {
+        let _ = settings_window.update(app, |settings, _window, cx| {
+            settings.select_category(SettingsCategory::Hooks, cx);
+            settings.set_hook_output_window(HookOutputWindow::OnFailure, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(main_window_mode(cx), HookOutputWindow::OnFailure);
+    cx.update(|_window, app| {
+        let shown = settings_window
+            .read_with(app, |settings, _cx| settings.hook_output_window)
+            .expect("settings window should remain readable");
+        assert_eq!(shown, HookOutputWindow::OnFailure);
+    });
+}
+
 /// Every layout and sort is offered, under the label the lists' own menus use.
 #[test]
 fn changed_file_list_options_cover_every_layout_and_sort() {

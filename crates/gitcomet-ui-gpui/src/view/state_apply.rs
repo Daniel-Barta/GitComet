@@ -56,6 +56,16 @@ fn hook_completion_notice(operation: &GitHookOperation) -> (components::ToastKin
     }
 }
 
+/// Whether a finished operation's hooks failed: one blocked it, or one that
+/// runs after it (a `post-*` hook) failed.
+fn hook_failed(operation: &GitHookOperation) -> bool {
+    operation.status == GitHookOperationStatus::SucceededWithHookFailure
+        || operation
+            .hooks
+            .iter()
+            .any(|hook| hook.status == GitHookRunStatus::Failed)
+}
+
 fn outer_failure_after_hooks(operation: &GitHookOperation) -> bool {
     operation.status == GitHookOperationStatus::Failed
         && !operation
@@ -369,6 +379,21 @@ impl GitCometView {
                     // duplicate the same result behind the dialog.
                     continue;
                 }
+                // "When a hook fails" opens the output in place of the notice,
+                // unless another dialog is up or the repo's output was
+                // minimized; then the notice offers it as usual.
+                if self.ui_model.read(cx).preferences.hooks.output_window
+                    == HookOutputWindow::OnFailure
+                    && hook_failed(operation)
+                    && self.pending_hook_activity_open.is_none()
+                    && !self.minimized_hook_activity_repos.contains(&next_repo.id)
+                    && !(self.is_overlay_open(cx)
+                        || self.command_palette_open
+                        || self.reveal_commit_open)
+                {
+                    self.pending_hook_activity_open = Some((next_repo.id, operation.id));
+                    continue;
+                }
                 let (kind, message) = hook_completion_notice(operation);
                 self.toast_host.update(cx, |host, cx| {
                     host.push_hook_activity_toast(kind, message, next_repo.id, operation.id, cx);
@@ -539,7 +564,14 @@ impl GitCometView {
             .map(|(repo_id, operation)| (*repo_id, operation.id, operation.time))
             .collect::<Vec<_>>();
 
-        if !newly_started_hook_chains.is_empty() && !self.hook_activity_workflow_is_open(cx) {
+        // Only "When a hook runs" opens the output as hooks start; the other
+        // modes leave the progress notice to offer it.
+        let open_as_hooks_start =
+            self.ui_model.read(cx).preferences.hooks.output_window == HookOutputWindow::Always;
+        if open_as_hooks_start
+            && !newly_started_hook_chains.is_empty()
+            && !self.hook_activity_workflow_is_open(cx)
+        {
             let another_overlay_is_open = self.is_overlay_open(cx) || self.command_palette_open;
             if another_overlay_is_open {
                 self.minimized_hook_activity_chains.extend(

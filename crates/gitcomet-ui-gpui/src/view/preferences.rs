@@ -280,6 +280,60 @@ impl Default for RemotePreferences {
     }
 }
 
+/// When the hook output window opens without being asked for. The progress
+/// and completion notices offer it in every mode.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(in crate::view) enum HookOutputWindow {
+    /// As soon as an operation runs a hook (upstream behavior).
+    #[default]
+    Always,
+    /// Only when the operation ends with a failed hook.
+    OnFailure,
+    /// Never: the notices' buttons open it.
+    Never,
+}
+
+impl HookOutputWindow {
+    pub(in crate::view) const ALL: [Self; 3] = [Self::Always, Self::OnFailure, Self::Never];
+
+    pub(super) const fn key(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::OnFailure => "on_failure",
+            Self::Never => "never",
+        }
+    }
+
+    pub(super) fn from_key(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.key() == raw)
+    }
+
+    pub(in crate::view) const fn settings_label(self) -> &'static str {
+        match self {
+            Self::Always => "When a hook runs",
+            Self::OnFailure => "When a hook fails",
+            Self::Never => "Never",
+        }
+    }
+
+    pub(in crate::view) const fn settings_description(self) -> &'static str {
+        match self {
+            Self::Always => "Open the output as soon as an operation starts a Git hook.",
+            Self::OnFailure => {
+                "Show progress in a notice, and open the output only when a hook fails."
+            }
+            Self::Never => {
+                "Show progress and the result in notices; open the output from them on demand."
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct HookPreferences {
+    pub(super) output_window: HookOutputWindow,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MaintenancePreferences {
     pub(super) recommend: bool,
@@ -310,6 +364,7 @@ pub(super) struct UiPreferences {
     pub(super) repository: RepositoryPreferences,
     pub(super) remotes: RemotePreferences,
     pub(super) maintenance: MaintenancePreferences,
+    pub(super) hooks: HookPreferences,
     pub(super) terminal: TerminalPreferences,
     pub(super) large_files: gitcomet_state::model::LargeFileSettings,
 }
@@ -463,6 +518,13 @@ impl UiPreferences {
             maintenance: MaintenancePreferences {
                 recommend: session.recommend_repo_maintenance.unwrap_or(true),
             },
+            hooks: HookPreferences {
+                output_window: session
+                    .hook_output_window
+                    .as_deref()
+                    .and_then(HookOutputWindow::from_key)
+                    .unwrap_or_default(),
+            },
             terminal: TerminalPreferences::from_ui_session(session),
             large_files: {
                 let defaults = gitcomet_state::model::LargeFileSettings::default();
@@ -537,6 +599,26 @@ mod tests {
             RemoteUrlPolicy::default()
         );
         assert!(preferences.security.check_for_updates_on_startup);
+    }
+
+    #[test]
+    fn hook_output_window_restores_modes_and_defaults_to_upstream() {
+        for (raw, expected) in [
+            (None, HookOutputWindow::Always),
+            (Some("always"), HookOutputWindow::Always),
+            (Some("on_failure"), HookOutputWindow::OnFailure),
+            (Some("never"), HookOutputWindow::Never),
+            (Some("future_mode"), HookOutputWindow::Always),
+        ] {
+            let preferences = UiPreferences::from_session(&session::UiSession {
+                hook_output_window: raw.map(str::to_owned),
+                ..Default::default()
+            });
+            assert_eq!(preferences.hooks.output_window, expected, "{raw:?}");
+        }
+        for mode in HookOutputWindow::ALL {
+            assert_eq!(HookOutputWindow::from_key(mode.key()), Some(mode));
+        }
     }
 
     #[test]

@@ -110,6 +110,8 @@ pub struct UiSession {
     pub auto_fetch_enabled: Option<bool>,
     pub auto_fetch_interval_minutes: Option<AutoFetchInterval>,
     pub recommend_repo_maintenance: Option<bool>,
+    /// When the hook output window opens on its own, as a UI preference key.
+    pub hook_output_window: Option<String>,
     pub git_executable_path: Option<PathBuf>,
     pub external_code_editor: Option<ExternalCodeEditorSetting>,
 }
@@ -330,6 +332,8 @@ pub(crate) struct UiSessionFile {
     auto_fetch_interval_minutes: Option<AutoFetchInterval>,
     #[serde(default, deserialize_with = "lenient")]
     recommend_repo_maintenance: Option<bool>,
+    #[serde(default, deserialize_with = "lenient")]
+    hook_output_window: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     git_executable_path: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
@@ -593,6 +597,7 @@ pub fn load_from_path(path: &Path) -> UiSession {
         auto_fetch_enabled: file.auto_fetch_enabled,
         auto_fetch_interval_minutes: file.auto_fetch_interval_minutes,
         recommend_repo_maintenance: file.recommend_repo_maintenance,
+        hook_output_window: file.hook_output_window,
         git_executable_path: file
             .git_executable_path
             .as_deref()

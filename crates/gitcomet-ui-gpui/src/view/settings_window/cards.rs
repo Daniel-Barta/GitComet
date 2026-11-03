@@ -32,6 +32,7 @@ impl SettingsWindowView {
             SettingsCategory::LargeFiles => self.large_files_card(theme, cx),
             SettingsCategory::Tags => self.tags_card(theme, cx),
             SettingsCategory::Maintenance => self.maintenance_card(theme, cx),
+            SettingsCategory::Hooks => self.hooks_card(theme, cx),
             SettingsCategory::GitExecutable => self.git_executable_card(theme, cx),
             SettingsCategory::Environment => self.environment_card(theme, cx),
             SettingsCategory::Links => self.links_card(theme, cx),
@@ -2080,6 +2081,46 @@ impl SettingsWindowView {
                         name = crate::view::product_name()
                     )),
             )
+    }
+
+    fn hooks_card(&self, theme: AppTheme, cx: &mut gpui::Context<Self>) -> Stateful<gpui::Div> {
+        let no_separator = gpui::rgba(0x00000000);
+        let last = HookOutputWindow::ALL.len() - 1;
+        let card = self
+            .card("settings_window_hooks_card", "Git hooks", theme)
+            .child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .pb_2()
+                    .text_size(theme.ui_text(14.0))
+                    .child("Open the hook output window"),
+            );
+        HookOutputWindow::ALL
+            .into_iter()
+            .enumerate()
+            .fold(card, |card, (ix, mode)| {
+                let row = self
+                    .setting_option_row(
+                        format!("settings_window_hook_output_{}", mode.key()),
+                        mode.settings_label(),
+                        Some(mode.settings_description().into()),
+                        self.hook_output_window == mode,
+                        theme,
+                    )
+                    .on_activate(
+                        false,
+                        controls::ControlActivation::Action,
+                        cx.listener(move |this, _e: &ClickEvent, _window, cx| {
+                            this.set_hook_output_window(mode, cx);
+                        }),
+                    );
+                card.child(if ix == last {
+                    row.border_color(no_separator)
+                } else {
+                    row
+                })
+            })
     }
 
     fn tags_card(&self, theme: AppTheme, cx: &mut gpui::Context<Self>) -> Stateful<gpui::Div> {

@@ -2945,6 +2945,41 @@ fn persist_ui_settings_round_trips_recommend_repo_maintenance() {
 }
 
 #[test]
+fn persist_ui_settings_round_trips_hook_output_window() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.json");
+    persist_to_path(
+        &path,
+        &UiSessionFile {
+            version: CURRENT_SESSION_FILE_VERSION,
+            ..UiSessionFile::default()
+        },
+    )
+    .expect("seed session file");
+    assert_eq!(load_from_path(&path).hook_output_window, None);
+
+    persist_ui_settings_to_path(
+        UiSettings {
+            hook_output_window: Some("on_failure".to_string()),
+            ..UiSettings::default()
+        },
+        &path,
+    )
+    .expect("persist hook output setting");
+    assert_eq!(
+        load_from_path(&path).hook_output_window.as_deref(),
+        Some("on_failure")
+    );
+
+    // A save that leaves the setting out keeps the stored value.
+    persist_ui_settings_to_path(UiSettings::default(), &path).expect("persist other settings");
+    assert_eq!(
+        load_from_path(&path).hook_output_window.as_deref(),
+        Some("on_failure")
+    );
+}
+
+#[test]
 fn persist_ui_settings_round_trips_fetch_prune_deleted_remote_branches() {
     let dir = env::temp_dir().join(format!(
         "gitcomet-ui-settings-test-{}-{}",

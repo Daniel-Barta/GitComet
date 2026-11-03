@@ -99,6 +99,7 @@ impl SettingsWindowView {
             annex_pull_push_on_adjusted: Some(self.large_file_settings.annex_pull_push),
             annex_sync_content: Some(self.large_file_settings.annex_sync_content),
             recommend_repo_maintenance: Some(self.recommend_repo_maintenance),
+            hook_output_window: Some(self.hook_output_window.key().to_string()),
             commit_push_after_enabled: None,
             git_executable_path: Some(applied_git_executable_path(&self.runtime_info.git.runtime)),
             terminal_external_mode: None,
@@ -1218,6 +1219,21 @@ impl SettingsWindowView {
         self.recommend_repo_maintenance = enabled;
         self.persist_preferences(cx);
         self.broadcast_preference(PreferenceChange::MaintenanceRecommendations(enabled), cx);
+        cx.notify();
+    }
+
+    pub(super) fn set_hook_output_window(
+        &mut self,
+        mode: HookOutputWindow,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.hook_output_window == mode {
+            return;
+        }
+
+        self.hook_output_window = mode;
+        self.persist_preferences(cx);
+        self.broadcast_preference(PreferenceChange::HookOutputWindow(mode), cx);
         cx.notify();
     }
 
