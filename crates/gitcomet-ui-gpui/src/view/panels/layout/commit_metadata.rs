@@ -370,7 +370,7 @@ impl DetailsPaneView {
 
     /// Syncs a field for each parent after the first, so a merge lists them
     /// all. Fields a merge grew stay around, undrawn, for later commits.
-    pub(super) fn sync_commit_details_extra_parent_fields(
+    fn sync_commit_details_extra_parent_fields(
         &mut self,
         parents: &[CommitId],
         repo_id: RepoId,
@@ -420,17 +420,22 @@ impl DetailsPaneView {
     }
 
     /// The parent SHA row: the first parent's field, then one per further
-    /// parent of a merge, in git's order.
+    /// parent of a merge, in git's order, each a link while `interactive`.
+    /// The caller syncs the first parent's field; this syncs the rest.
     pub(super) fn commit_details_parent_row(
-        &self,
-        theme: AppTheme,
-        parent_count: usize,
+        &mut self,
+        parents: &[CommitId],
+        repo_id: RepoId,
         interactive: bool,
+        theme: AppTheme,
+        cx: &mut gpui::Context<Self>,
     ) -> Div {
+        let repo_id = if interactive { repo_id } else { RepoId(0) };
+        self.sync_commit_details_extra_parent_fields(parents, repo_id, interactive, theme, cx);
         let extra = self
             .commit_details_extra_parent_fields
             .iter()
-            .take(parent_count.saturating_sub(1))
+            .take(parents.len().saturating_sub(1))
             .map(|(input, link_menu)| (input, link_menu));
         let values = std::iter::once((
             &self.commit_details_parent_input,
@@ -446,7 +451,7 @@ impl DetailsPaneView {
         });
         commit_details_selectable_row(
             theme,
-            if parent_count > 1 {
+            if parents.len() > 1 {
                 "Parent commit SHAs"
             } else {
                 "Parent commit SHA"

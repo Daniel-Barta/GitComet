@@ -199,13 +199,6 @@ impl DetailsPaneView {
                         theme,
                         cx,
                     );
-                    self.sync_commit_details_extra_parent_fields(
-                        &details.parent_ids,
-                        if current { repo_id } else { RepoId(0) },
-                        current,
-                        theme,
-                        cx,
-                    );
 
                     let message = if current {
                         let availability = self
@@ -288,9 +281,11 @@ impl DetailsPaneView {
                                     ),
                                 ))
                                 .child(self.commit_details_parent_row(
-                                    theme,
-                                    details.parent_ids.len(),
+                                    &details.parent_ids,
+                                    repo_id,
                                     current,
+                                    theme,
+                                    cx,
                                 )),
                         )
                         .child(self.commit_files_section(repo_id, commit_details_rev, details, cx))
