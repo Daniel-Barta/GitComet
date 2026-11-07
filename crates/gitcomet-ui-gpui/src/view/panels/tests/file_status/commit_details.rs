@@ -1375,8 +1375,6 @@ fn show_commit_with_parents(
                 }));
 
             let next_state = app_state_with_repo(repo, repo_id);
-            this.store
-                .replace_snapshot_for_test(Arc::clone(&next_state));
             push_test_state(this, next_state, cx);
         });
     });

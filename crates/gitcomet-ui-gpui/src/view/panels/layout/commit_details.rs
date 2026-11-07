@@ -187,31 +187,13 @@ impl DetailsPaneView {
                         self.commit_details_date_display(details).as_str(),
                         cx,
                     );
-                    self.sync_commit_details_parent_fields(
+                    let parent_row = self.commit_details_parent_row(
                         &details.parent_ids,
-                        if current { repo_id } else { RepoId(0) },
+                        repo_id,
                         current,
                         theme,
                         cx,
                     );
-                    let parent_label = if details.parent_ids.len() > 1 {
-                        "Parent commit SHAs"
-                    } else {
-                        "Parent commit SHA"
-                    };
-                    let parent_values = self.commit_details_parent_fields
-                        [..details.parent_ids.len().max(1)]
-                        .iter()
-                        .map(|field| {
-                            if current {
-                                commit_details_monospace_element(
-                                    field.link_menu.clone().into_any_element(),
-                                )
-                            } else {
-                                commit_details_monospace_value(field.input.clone())
-                            }
-                        })
-                        .collect::<Vec<_>>();
 
                     let message = if current {
                         let availability = self
@@ -293,18 +275,7 @@ impl DetailsPaneView {
                                         self.commit_details_date_input.clone(),
                                     ),
                                 ))
-                                .child(commit_details_selectable_row(
-                                    theme,
-                                    parent_label,
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .w_full()
-                                        .min_w(px(0.0))
-                                        .children(parent_values)
-                                        .into_any_element(),
-                                )),
+                                .child(parent_row),
                         )
                         .child(self.commit_files_section(repo_id, commit_details_rev, details, cx))
                         .into_any_element()

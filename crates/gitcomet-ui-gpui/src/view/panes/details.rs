@@ -71,7 +71,7 @@ pub(in super::super) struct CommitDetailsParentField {
 
 impl CommitDetailsParentField {
     /// `ix` is the parent's position. The first parent keeps the plain menu id;
-    /// later ones carry git's parent number (`^2`, `^3`, ...).
+    /// later ones end in git's parent number: `_2` for `^2`, and so on.
     fn new(ix: usize, root_view: WeakEntity<GitCometView>, cx: &mut gpui::App) -> Self {
         let input = cx.new(|cx| {
             let mut input =

@@ -339,29 +339,28 @@ impl DetailsPaneView {
             });
     }
 
-    /// One field per parent, in git's order. A root commit shows "—" in the
-    /// first, which links nowhere.
-    pub(super) fn sync_commit_details_parent_fields(
+    /// The parent row: one field per parent, in git's order, each a link while
+    /// `current`. A root commit shows "—" in the first, which links nowhere.
+    pub(super) fn commit_details_parent_row(
         &mut self,
         parents: &[CommitId],
         repo_id: RepoId,
-        interactive: bool,
+        current: bool,
         theme: AppTheme,
         cx: &mut gpui::Context<Self>,
-    ) {
+    ) -> Div {
         let count = parents.len().max(1);
         self.ensure_commit_details_parent_fields(count, cx);
-        for (ix, field) in self.commit_details_parent_fields[..count]
-            .iter()
-            .enumerate()
-        {
+        let fields = &self.commit_details_parent_fields[..count];
+        let repo_id = if current { repo_id } else { RepoId(0) };
+        for (ix, field) in fields.iter().enumerate() {
             let parent = parents.get(ix);
             let text = parent.map_or("—", |parent| parent.as_ref());
             Self::sync_commit_details_input_value(&field.input, text, cx);
             field.input.update(cx, |input, cx| {
                 input.set_highlights(commit_sha_field_highlights(text, theme), cx);
             });
-            let links = commit_sha_field_links(text, interactive && parent.is_some(), true);
+            let links = commit_sha_field_links(text, current && parent.is_some(), true);
             field.link_menu.update(cx, |menu, cx| {
                 menu.sync(
                     field.input.clone(),
@@ -372,6 +371,31 @@ impl DetailsPaneView {
                 );
             });
         }
+
+        let label = if parents.len() > 1 {
+            "Parent commit SHAs"
+        } else {
+            "Parent commit SHA"
+        };
+        let values = fields.iter().map(|field| {
+            if current {
+                commit_details_monospace_element(field.link_menu.clone().into_any_element())
+            } else {
+                commit_details_monospace_value(field.input.clone())
+            }
+        });
+        commit_details_selectable_row(
+            theme,
+            label,
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .min_w(px(0.0))
+                .children(values)
+                .into_any_element(),
+        )
     }
 
     /// The SHA field's text and link style, washed whole when the history find
