@@ -215,6 +215,7 @@ impl PaneStore {
                 lifetime,
                 view,
                 target: in_session_worktree(target),
+                request: None,
             },
             Msg::ClearDiffSelection { repo_id: id }
                 if id == repo_id && self.policy.close_button =>
@@ -279,6 +280,7 @@ impl PaneStore {
                     lifetime,
                     view,
                     target,
+                    request: None,
                 }));
                 DiffSessionMsg::SetContentMode {
                     repo_id,
@@ -322,6 +324,14 @@ impl PaneStore {
             | Msg::StageHunk { repo_id: id, .. }
             | Msg::UnstageHunk { repo_id: id, .. })
                 if id == repo_id && self.policy.allow_stage && !linked =>
+            {
+                store.dispatch(msg);
+                return;
+            }
+            // "Discard line(s)" and its U key: the line engine's discard
+            // reverts the working tree, as the structural one above does.
+            msg @ Msg::ApplyWorktreePatch { repo_id: id, .. }
+                if id == repo_id && self.policy.allow_edit && !linked =>
             {
                 store.dispatch(msg);
                 return;

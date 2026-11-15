@@ -1272,7 +1272,6 @@ fn set_active_repo_resets_the_activated_tabs_history_selection_only_on_change() 
         anchor: Some(stale_commit.clone()),
         anchor_index: Some(0),
         anchor_log_rev: Some(target.history_state.log_rev),
-        compare_pair: false,
         working_tree: false,
     };
     target.history_state.range_selection = Some(RangeSelection {
@@ -1282,6 +1281,7 @@ fn set_active_repo_resets_the_activated_tabs_history_selection_only_on_change() 
         to_label: "stale".to_string(),
         options: Default::default(),
         base: None,
+        source: crate::model::ComparisonSource::SelectedPair,
     });
     target.history_state.worktree_selection = Some(PathBuf::from("/tmp/repo1-linked"));
     target.history_state.commit_details = Loadable::Error("stale details".to_string());
@@ -1878,15 +1878,11 @@ fn set_active_repo_selected_conflict_target_reuses_existing_conflict_state() {
         let content: Arc<str> = Arc::from("conflict contents");
         repo1_state.conflict_state.conflict_file =
             Loadable::Ready(Some(crate::model::ConflictFile {
-                path: conflict_path.clone().into(),
-                base_bytes: None,
-                ours_bytes: None,
-                theirs_bytes: None,
-                current_bytes: None,
                 base: Some(Arc::clone(&content)),
                 ours: Some(Arc::clone(&content)),
                 theirs: Some(Arc::clone(&content)),
                 current: Some(content),
+                ..crate::model::ConflictFile::empty(conflict_path.clone())
             }));
         repo1_state.conflict_state.conflict_rev = 41;
         repo1_state.conflict_state.conflict_rev

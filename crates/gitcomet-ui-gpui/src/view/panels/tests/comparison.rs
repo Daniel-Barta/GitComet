@@ -1,6 +1,8 @@
 use super::*;
 use gitcomet_core::domain::{Commit, CommitFileChange, CommitId, CommitParentIds, FileStatusKind};
-use gitcomet_state::model::{CommitMultiSelection, Loadable, RangeSelection, RepoId};
+use gitcomet_state::model::{
+    CommitMultiSelection, ComparisonSource, Loadable, RangeSelection, RepoId,
+};
 
 fn sha(ix: usize) -> String {
     format!("{ix:040}")
@@ -80,6 +82,11 @@ fn draw_comparison_view(
         to_label: "tip".into(),
         options: Default::default(),
         base: None,
+        source: if selected >= 2 {
+            ComparisonSource::MergedSelection
+        } else {
+            ComparisonSource::Explicit
+        },
     };
     draw_details(
         cx,
@@ -104,29 +111,6 @@ fn draw_details<'a>(
     gpui::Entity<super::super::GitCometView>,
     &'a mut gpui::VisualTestContext,
 ) {
-    let selection = CommitMultiSelection {
-        commits: selected
-            .iter()
-            .map(|&ix| CommitId(sha(ix).into()))
-            .collect::<Vec<_>>()
-            .into(),
-        ..Default::default()
-    };
-    draw_details_with_selection(cx, repo_id, commit_count, selection, range, files)
-}
-
-/// [`draw_details`] with the multi-selection given whole.
-fn draw_details_with_selection(
-    cx: &mut gpui::TestAppContext,
-    repo_id: RepoId,
-    commit_count: usize,
-    selection: CommitMultiSelection,
-    range: Option<RangeSelection>,
-    files: Files,
-) -> (
-    gpui::Entity<super::super::GitCometView>,
-    &mut gpui::VisualTestContext,
-) {
     let (store, events) = AppStore::new_test(Arc::new(TestBackend));
     let (view, cx) = cx.add_window_view(|window, cx| {
         super::super::GitCometView::new(store, events, None, window, cx)
@@ -144,7 +128,14 @@ fn draw_details_with_selection(
                 next_cursor: None,
             }));
             repo.log_rev = 1;
-            repo.history_state.multi_selection = selection;
+            repo.history_state.multi_selection = CommitMultiSelection {
+                commits: selected
+                    .iter()
+                    .map(|&ix| CommitId(sha(ix).into()))
+                    .collect::<Vec<_>>()
+                    .into(),
+                ..Default::default()
+            };
             repo.history_state.range_selection = range;
             repo.history_state.range_files = files.into_loadable();
 
@@ -161,58 +152,23 @@ fn draw_details_with_selection(
     (view, cx)
 }
 
-/// Commits that are not consecutive have no merged diff, so the reducer opens
+/// Three or more commits with a gap have no merged diff, so the reducer opens
 /// no comparison for them. The pane lists them and says why there is no diff,
 /// rather than leaving a list that reads as if the diff were still to come.
 #[gpui::test]
 fn a_selection_without_a_merged_diff_says_why(cx: &mut gpui::TestAppContext) {
-    let (_, cx) = draw_details(cx, RepoId(76), 3, &[0, 2], None, Files::Loading);
+    let (_, cx) = draw_details(cx, RepoId(76), 4, &[0, 1, 3], None, Files::Loading);
 
     assert!(
         cx.debug_bounds("multi_commit_no_merged_diff").is_some(),
-        "expected the hint that only consecutive commits have a combined diff"
+        "expected the no-comparison hint"
     );
     assert!(cx.debug_bounds("commit_multi_row_0").is_some());
-    assert!(cx.debug_bounds("commit_multi_row_1").is_some());
+    assert!(cx.debug_bounds("commit_multi_row_2").is_some());
     assert!(
         cx.debug_bounds("range_comparison_body").is_none(),
         "no comparison body without a comparison"
     );
-}
-
-/// A Ctrl/Cmd+Shift-click pair is multi-selected like a merged diff, but its
-/// comparison is the direct diff between the two commits, so the pane names
-/// the endpoints rather than claiming a merged diff of the selection.
-#[gpui::test]
-fn a_compare_pair_presents_a_direct_diff(cx: &mut gpui::TestAppContext) {
-    let range = RangeSelection::new(
-        CommitId(sha(2).into()),
-        Some(CommitId(sha(0).into())),
-        "base".into(),
-        "tip".into(),
-    );
-    let selection = CommitMultiSelection {
-        commits: vec![CommitId(sha(0).into()), CommitId(sha(2).into())].into(),
-        anchor: Some(CommitId(sha(0).into())),
-        compare_pair: true,
-        ..Default::default()
-    };
-    let (_, cx) =
-        draw_details_with_selection(cx, RepoId(84), 3, selection, Some(range), Files::Loaded(1));
-
-    assert!(cx.debug_bounds("range_comparison_direct_diff").is_some());
-    assert!(cx.debug_bounds("range_comparison_merged_diff").is_none());
-    assert!(cx.debug_bounds("commit_multi_row_0").is_some());
-    assert!(cx.debug_bounds("commit_multi_row_1").is_some());
-}
-
-/// A plain multi-selection's comparison is its merged diff.
-#[gpui::test]
-fn a_multi_selection_presents_a_merged_diff(cx: &mut gpui::TestAppContext) {
-    let cx = draw_comparison(cx, RepoId(85), 2, 2, Files::Loaded(1));
-
-    assert!(cx.debug_bounds("range_comparison_merged_diff").is_some());
-    assert!(cx.debug_bounds("range_comparison_direct_diff").is_none());
 }
 
 /// A range comparison started via "mark + compare" (or a branch/tag/worktree
@@ -1147,12 +1103,9 @@ fn entry_labels(
             this.popover_host.update(cx, |host, cx| {
                 host.context_menu_model(&kind, cx)
                     .expect("a context menu model")
-                    .items
-                    .iter()
-                    .filter_map(|item| match item {
-                        ContextMenuItem::Entry { label, .. } => Some(label.to_string()),
-                        _ => None,
-                    })
+                    .entry_labels()
+                    .into_iter()
+                    .map(str::to_string)
                     .collect()
             })
         })

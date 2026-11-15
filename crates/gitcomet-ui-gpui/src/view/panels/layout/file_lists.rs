@@ -138,11 +138,8 @@ impl DetailsPaneView {
                 .selected(selected, theme.colors.interaction.selected_background)
                 .disabled(disabled);
             let icon_color = interaction.color(commit_file_filter_color(filter, theme), state);
-            let selected_border = if theme.is_dark {
-                gpui::rgba(0x00000000)
-            } else {
-                interaction.color(theme.colors.interaction.selected_indicator, state)
-            };
+            // The same hairline the sidebar's Branches/Files switch draws.
+            let selected_border = interaction.color(theme.colors.stroke.subtle, state);
             let tab = div()
                 .id((SharedString::from(format!("{id_prefix}_filter_tab")), ix))
                 .debug_selector(move || format!("{id_prefix}_filter_tab_{ix}"))
@@ -308,6 +305,10 @@ impl DetailsPaneView {
                 ("commit_details_files_container", repo_id.0),
                 ("commit_details_files_scrollbar", repo_id.0),
                 &self.commit_files_scroll,
+                Some(
+                    self.review_file_focus(crate::view::rows::FileListId::CommitFiles)
+                        .clone(),
+                ),
                 self.changed_file_list(
                     repo_id,
                     crate::view::rows::FileListId::CommitFiles,
@@ -384,7 +385,14 @@ impl DetailsPaneView {
             .child(visible_bounds_probe())
             .child(heading)
             .child(filters)
-            .child(files)
+            .child(
+                self.review_file_container(crate::view::rows::FileListId::CommitFiles, cx)
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .child(files),
+            )
             .into_any_element()
     }
 }

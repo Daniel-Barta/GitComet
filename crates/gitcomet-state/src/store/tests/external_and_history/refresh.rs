@@ -51,7 +51,6 @@ fn failed_detached_checkout_restores_head_after_unchanged_refresh(scope: LogScop
             anchor: Some(rejected_target.clone()),
             anchor_index: Some(1),
             anchor_log_rev: Some(rev),
-            compare_pair: false,
             working_tree: false,
         });
         let selection = repo.history_state.multi_selection.clone();
@@ -149,7 +148,6 @@ fn unchanged_focus_keeps_the_entire_page_selection_and_revisions() {
         anchor: Some(selected),
         anchor_index: Some(49_999),
         anchor_log_rev: Some(rev),
-        compare_pair: false,
         working_tree: false,
     });
     let selection = state.repos[0].history_state.multi_selection.clone();

@@ -118,6 +118,8 @@ pub(crate) enum PopoverKind {
     ErrorDetails {
         toast_id: u64,
     },
+    /// The searchable keyboard shortcut reference.
+    KeyboardShortcuts,
     RepoPicker {
         scope: RepoPickerScope,
     },
@@ -286,6 +288,9 @@ pub(crate) enum PopoverKind {
     },
     PullPicker,
     PushPicker,
+    // The commit box now has Commit / Commit & Push buttons and an amend
+    // checkbox, so nothing opens this menu any more.
+    #[allow(dead_code)]
     CommitOptionsMenu {
         repo_id: RepoId,
     },
@@ -365,14 +370,14 @@ pub(crate) enum PopoverKind {
         /// approved through its link menu.
         load_remote_image_url: Option<SharedString>,
     },
-    /// Actions for a commit id clicked in a commit message or a SHA field.
+    /// Actions for a commit id clicked in a commit message or from a commit
+    /// card SHA chip.
     CommitShaLinkMenu {
         repo_id: RepoId,
         commit_id: CommitId,
-        /// A commit's own SHA field cannot navigate to itself.
-        allow_navigate: bool,
     },
     DiffEditorMenu {
+        context_actions: Vec<gitcomet_extension_api::HostedAction>,
         repo_id: Option<RepoId>,
         area: DiffArea,
         path: Option<std::path::PathBuf>,
@@ -396,7 +401,7 @@ pub(crate) enum PopoverKind {
         is_three_way: bool,
         selected_choices: Vec<conflict_resolver::ConflictChoice>,
         output_line_ix: Option<usize>,
-        /// section 30 split: row count of a valid split selection in this block, or
+        /// Split: row count of a valid split selection in this block, or
         /// `None` when there is no splittable selection (hides the entry).
         split_selection_rows: Option<usize>,
         /// Revision-bound target for joining this chunk with its previous

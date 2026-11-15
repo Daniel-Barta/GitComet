@@ -20,11 +20,13 @@ mod close_guard_confirm;
 mod commit_mainline;
 mod commit_prompt;
 pub(in super::super) mod context_menu;
+pub(in crate::view) use context_menu::compare_with_mark_label;
 mod create_branch_from_ref_prompt;
 mod create_tag_prompt;
 mod delete_branches_confirm;
 mod delete_permanently_confirm;
 mod delete_remote_branch_confirm;
+mod dialog_size;
 mod discard_changes_confirm;
 mod discard_folder_changes_confirm;
 mod error_details;
@@ -39,6 +41,7 @@ mod force_push_confirm;
 mod force_remove_worktree_confirm;
 mod hook_activity;
 mod interactive_cherry_pick_confirm;
+mod keyboard_shortcuts;
 mod menu_layer;
 mod merge_abort_confirm;
 mod merge_commit_confirm;
@@ -191,6 +194,7 @@ pub(in super::super) struct PopoverHost {
     change_tracking_view: ChangeTrackingView,
     commit_amend_enabled: bool,
     commit_push_after_enabled: bool,
+    commit_skip_hooks_enabled: bool,
     diff_content_mode: DiffContentMode,
     diff_whitespace_mode: DiffWhitespaceMode,
     diff_reveal_whitespace_chars: bool,
@@ -249,6 +253,7 @@ pub(in super::super) struct PopoverHost {
     error_details_text: error_details::TextState,
     error_details_scroll: ScrollHandle,
     error_details_rail_scroll: ScrollHandle,
+    keyboard_shortcuts: keyboard_shortcuts::State,
     /// Explicit 1-based mainline selected in the open merge-commit
     /// cherry-pick or revert confirmation. Reset every time either opens.
     commit_mainline: Option<usize>,
@@ -299,10 +304,14 @@ pub(in super::super) struct PopoverHost {
     /// rows remain stable for the duration of one keyboard interaction.
     cached_workspaces: Vec<session::Workspace>,
     cached_workspace_id: Option<session::WorkspaceId>,
+    /// Whether an extension supplies "Check for updates", fixed at construction.
+    extension_update_check: bool,
     /// Extension commands in the app menu, fixed at construction.
     extension_app_menu: Rc<[crate::view::extension_host::ExtensionMenuEntry]>,
     /// Extension commands in a repository tab's menu, fixed at construction.
     extension_repo_tab_menu: Rc<[crate::view::extension_host::ExtensionMenuEntry]>,
+    /// Extension entries in branch and commit menus, fixed at construction.
+    extension_ref_menu: Rc<[crate::view::extension_host::ExtensionRefMenuEntry]>,
     /// Storage keys of the repository picker sections the user folded away.
     cached_collapsed_picker_sections: std::collections::BTreeSet<String>,
     repo_picker_sort: repo_picker::RepoPickerSort,
@@ -499,6 +508,19 @@ pub(in crate::view) fn benchmark_workspace_rows(
     worktree_badge_picker::rows(repo, query).items
 }
 
+/// `time` in the user's date, time and timezone settings.
+fn timestamp_label(this: &PopoverHost, time: std::time::SystemTime) -> String {
+    let mut label = String::with_capacity(24);
+    format_datetime_into(
+        &mut label,
+        time,
+        this.date_time_format,
+        this.timezone,
+        this.show_timezone,
+    );
+    label
+}
+
 pub(in super::super) fn popover_ui_scale(cx: &mut gpui::Context<PopoverHost>) -> ui_scale::UiScale {
     ui_scale::UiScale::current(cx)
 }
@@ -693,6 +715,7 @@ fn popover_is_confirm_dialog(kind: &PopoverKind) -> bool {
                 ..
             }
             | PopoverKind::ErrorDetails { .. }
+            | PopoverKind::KeyboardShortcuts
             | PopoverKind::ForcePushConfirm { .. }
             | PopoverKind::CherryPickCommitConfirm { .. }
             | PopoverKind::InteractiveCherryPickConfirm { .. }
@@ -1105,6 +1128,7 @@ pub(in super::super) fn popover_width_spec(kind: &PopoverKind) -> Option<Popover
         PopoverKind::HookActivity { .. } | PopoverKind::ErrorDetails { .. } => {
             Some(DIALOG_900_WIDTH)
         }
+        PopoverKind::KeyboardShortcuts => Some(keyboard_shortcuts::WIDTH),
         PopoverKind::CreateBranchFromRefPrompt { .. }
         | PopoverKind::RenameBranchPrompt { .. }
         | PopoverKind::CheckoutRemoteBranchPrompt { .. } => Some(DIALOG_540_WIDTH),

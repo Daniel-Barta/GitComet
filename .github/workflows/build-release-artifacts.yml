@@ -629,11 +629,11 @@ jobs:
         include:
           - target_platform: aarch64-darwin
             arch: arm64
-            runs_on: macos-latest
+            runs_on: macos-26
             dump_syms_triple: aarch64-apple-darwin
           - target_platform: x86_64-darwin
             arch: x86_64
-            runs_on: macos-15-intel
+            runs_on: macos-26-intel
             dump_syms_triple: x86_64-apple-darwin
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
@@ -1068,7 +1068,7 @@ jobs:
 
       - name: Install cosign
         if: ${{ env.ENABLE_KEYLESS_SIGNING == 'true' }}
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
 
       - name: Sign SHA256 checksums with keyless signing
         if: ${{ env.ENABLE_KEYLESS_SIGNING == 'true' }}

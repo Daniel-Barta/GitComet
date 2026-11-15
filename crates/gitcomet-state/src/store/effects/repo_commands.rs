@@ -2,15 +2,15 @@ use crate::model::{AppState, Loadable};
 use crate::msg::RepoCommandEffect;
 use crate::msg::{InternalMsg, Msg, RepoCommandKind};
 use crate::store::repository_runtime::RepositoryRuntimes;
-use gitcomet_core::auth::{ScopedStagedGitAuth, StagedGitAuth};
+use gitcomet_core::auth::StagedGitAuth;
 use gitcomet_core::domain::{DiffTarget, Upstream};
 use gitcomet_core::error::{Error, ErrorKind};
 use gitcomet_core::remote_url::RemoteUrlPolicy;
 use gitcomet_core::services::MergeFastForward;
 use gitcomet_core::services::{
-    CommandOutput, ConflictSide, ForcePushLease, GitBackend, GitRepository, InteractiveRebaseEntry,
-    PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitContext, SafePushAfterCommitTarget,
-    SubmoduleTrustTarget, WorktreeCheckout,
+    CommandOutput, ConflictSide, ForcePushLease, GitBackend, GitHooks, GitRepository,
+    InteractiveRebaseEntry, PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitContext,
+    SafePushAfterCommitTarget, SubmoduleTrustTarget, WorktreeCheckout,
 };
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -18,8 +18,9 @@ use std::sync::RwLock;
 
 use super::super::{RepoId, executor::TaskExecutor, worker_channel::StoreWorkerSender};
 use super::util::{
-    GitOperationTask, message_subject, missing_repo_error, send_or_log, short_commit_id,
-    single_line_context, spawn_with_repo, spawn_with_repo_or_else,
+    GitOperationTask, SKIPPING_HOOKS_CONTEXT, message_subject, missing_repo_error,
+    run_with_git_auth, send_or_log, short_commit_id, single_line_context, spawn_with_repo,
+    spawn_with_repo_or_else,
 };
 
 const GITIGNORE_FILE_NAME: &str = gitcomet_core::gitignore::FILE_NAME;
@@ -139,11 +140,16 @@ fn repo_command_context(command: &RepoCommandKind) -> Option<String> {
         RepoCommandKind::Push | RepoCommandKind::ForcePush => {
             "Current branch → configured upstream".to_string()
         }
-        RepoCommandKind::PushAfterCommit { target, .. } => {
-            format!(
+        RepoCommandKind::PushAfterCommit { target, hooks, .. } => {
+            let context = format!(
                 "{} → {}/{}",
                 target.local_branch, target.remote, target.branch
-            )
+            );
+            if hooks.skipped() {
+                format!("{context} · {SKIPPING_HOOKS_CONTEXT}")
+            } else {
+                context
+            }
         }
         RepoCommandKind::ForcePushWithLease { lease } => {
             format!("{} → {}/{}", lease.local_branch, lease.remote, lease.branch)
@@ -474,19 +480,6 @@ fn resolve_worktree_save_target(workdir: &Path, path: &Path) -> Result<(PathBuf,
             )
         })?;
     Ok((relative_path, full))
-}
-
-fn run_with_git_auth<R>(
-    auth: Option<StagedGitAuth>,
-    run: impl FnOnce() -> Result<R, Error>,
-) -> Result<R, Error> {
-    if let Some(auth) = auth {
-        // The guard clears the staged auth on success, error, and panic.
-        let _scoped = ScopedStagedGitAuth::stage(auth);
-        run()
-    } else {
-        run()
-    }
 }
 
 struct AddSubmoduleRequest {
@@ -1457,6 +1450,7 @@ fn schedule_push_after_commit(
     repo_id: RepoId,
     target: SafePushAfterCommitTarget,
     set_upstream: bool,
+    hooks: GitHooks,
     auth: Option<StagedGitAuth>,
 ) {
     let command_target = target.clone();
@@ -1468,14 +1462,11 @@ fn schedule_push_after_commit(
         RepoCommandKind::PushAfterCommit {
             target: command_target,
             set_upstream,
+            hooks,
         },
         move |repo| {
             run_with_git_auth(auth, || {
-                if set_upstream {
-                    repo.push_after_commit_set_upstream_with_output(&target)
-                } else {
-                    repo.push_after_commit_with_output(&target)
-                }
+                repo.push_after_commit_with_hooks(&target, set_upstream, hooks)
             })
         },
     );
@@ -1491,6 +1482,8 @@ fn schedule_safe_push_after_commit(
 ) {
     let finish_context = context.clone();
     let follow_up_auth = auth.clone();
+    let missing_context = context.clone();
+    let missing_auth = auth.clone();
     // The preflight fetches the push target and then reads FETCH_HEAD, which
     // an automatic fetch beside it would rewrite.
     let foreground = repos.repository(&repo_id).map(|repo| {
@@ -1499,24 +1492,41 @@ fn schedule_safe_push_after_commit(
             .admission()
             .reserve(super::super::auto_fetch::repository_key(repo.as_ref()))
     });
-    spawn_with_repo(executor, repos, repo_id, msg_tx, move |repo, msg_tx| {
-        let result = foreground
-            .as_ref()
-            .map_or(Ok(()), |reservation| {
-                reservation.wait(&gitcomet_core::services::CancellationToken::new())
-            })
-            .and_then(|()| run_with_git_auth(auth, || repo.safe_push_after_commit(&context)));
-        drop(foreground);
-        send_or_log(
-            &msg_tx,
-            Msg::Internal(crate::msg::InternalMsg::SafePushAfterCommitFinished {
-                repo_id,
-                context: finish_context,
-                auth: follow_up_auth,
-                result,
-            }),
-        );
-    });
+    spawn_with_repo_or_else(
+        executor,
+        repos,
+        repo_id,
+        msg_tx,
+        move |repo, msg_tx| {
+            let result = foreground
+                .as_ref()
+                .map_or(Ok(()), |reservation| {
+                    reservation.wait(&gitcomet_core::services::CancellationToken::new())
+                })
+                .and_then(|()| run_with_git_auth(auth, || repo.safe_push_after_commit(&context)));
+            drop(foreground);
+            send_or_log(
+                &msg_tx,
+                Msg::Internal(crate::msg::InternalMsg::SafePushAfterCommitFinished {
+                    repo_id,
+                    context: finish_context,
+                    auth: follow_up_auth,
+                    result,
+                }),
+            );
+        },
+        move |msg_tx| {
+            send_or_log(
+                &msg_tx,
+                Msg::Internal(crate::msg::InternalMsg::SafePushAfterCommitFinished {
+                    repo_id,
+                    context: missing_context,
+                    auth: missing_auth,
+                    result: Err(missing_repo_error(repo_id)),
+                }),
+            );
+        },
+    );
 }
 
 fn schedule_force_push(
@@ -2317,194 +2327,6 @@ fn schedule_launch_mergetool(
     );
 }
 
-#[cfg(test)]
-mod worktree_save_target_tests {
-    #[cfg(unix)]
-    use super::append_gitignore_patterns_in_workdir;
-    use super::resolve_worktree_save_target;
-    use gitcomet_core::error::ErrorKind;
-    use std::path::Path;
-
-    #[test]
-    fn markdown_checkbox_saves_accept_the_read_baseline_and_reject_intervening_edits() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("README.md");
-        let mut filesystem = gitcomet_core::filesystem::Filesystem::default();
-        let unchecked = b"- [ ] ship it\n";
-        let checked = b"- [x] ship it\n";
-        std::fs::write(&path, unchecked).unwrap();
-        super::guarded_worktree_save(&mut filesystem, &path, checked, Some(unchecked)).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), checked);
-        super::guarded_worktree_save(&mut filesystem, &path, unchecked, Some(checked)).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), unchecked);
-        std::fs::write(&path, b"external edits\n").unwrap();
-        assert!(
-            super::guarded_worktree_save(&mut filesystem, &path, checked, Some(unchecked)).is_err()
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), b"external edits\n");
-    }
-
-    #[test]
-    fn merge_save_preserves_external_edits_and_does_not_recreate_a_moved_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("conflict.txt");
-        let mut filesystem = gitcomet_core::filesystem::Filesystem::default();
-        std::fs::write(&path, b"external edit").unwrap();
-        assert!(
-            super::guarded_worktree_save(&mut filesystem, &path, b"resolved", Some(b"markers"))
-                .is_err()
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), b"external edit");
-        std::fs::rename(&path, dir.path().join("renamed.txt")).unwrap();
-        assert!(
-            super::guarded_worktree_save(
-                &mut filesystem,
-                &path,
-                b"resolved",
-                Some(b"external edit")
-            )
-            .is_err()
-        );
-        assert!(!path.exists());
-        super::guarded_worktree_save(
-            &mut filesystem,
-            &dir.path().join("renamed.txt"),
-            b"resolved",
-            Some(b"external edit"),
-        )
-        .unwrap();
-        assert_eq!(
-            std::fs::read(dir.path().join("renamed.txt")).unwrap(),
-            b"resolved"
-        );
-    }
-
-    #[test]
-    fn git_metadata_paths_are_refused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for path in [".git/hooks/pre-commit", "a/../.git/config", "./.GIT/config"] {
-            assert!(
-                resolve_worktree_save_target(dir.path(), Path::new(path)).is_err(),
-                "{path:?} must be rejected"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn gitignore_append_through_symlink_out_of_workdir_is_refused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let outside = tempfile::tempdir().expect("outside dir");
-        let victim = outside.path().join("victim");
-        std::fs::write(&victim, "original\n").expect("write victim");
-        std::os::unix::fs::symlink(&victim, dir.path().join(".gitignore")).expect("symlink");
-
-        let err = append_gitignore_patterns_in_workdir(
-            &std::sync::Mutex::default(),
-            dir.path(),
-            &["secret".to_string()],
-        )
-        .expect_err("symlinked .gitignore");
-        let ErrorKind::Backend(message) = err.kind() else {
-            panic!("expected a backend refusal, got {err:?}");
-        };
-        assert!(message.contains("symlink"), "{message}");
-        assert_eq!(
-            std::fs::read_to_string(&victim).expect("victim"),
-            "original\n"
-        );
-    }
-
-    #[test]
-    fn nested_relative_path_resolves_under_workdir() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (relative, full) =
-            resolve_worktree_save_target(dir.path(), Path::new("./src/../src/lib.rs"))
-                .expect("nested path");
-        assert_eq!(relative, Path::new("src/lib.rs"));
-        assert_eq!(full, dir.path().join("src/lib.rs"));
-    }
-
-    #[test]
-    fn parent_dir_escape_is_refused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let err = resolve_worktree_save_target(dir.path(), Path::new("../outside.txt"))
-            .expect_err("lexical escape");
-        assert!(matches!(err.kind(), ErrorKind::Backend(_)));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn save_through_symlink_out_of_workdir_is_refused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let outside = tempfile::tempdir().expect("outside dir");
-        let victim = outside.path().join("authorized_keys");
-        std::fs::write(&victim, "original").expect("write victim");
-        std::os::unix::fs::symlink(&victim, dir.path().join("notes.md")).expect("symlink");
-
-        let err = resolve_worktree_save_target(dir.path(), Path::new("notes.md"))
-            .expect_err("symlinked file");
-        let ErrorKind::Backend(message) = err.kind() else {
-            panic!("expected a backend refusal, got {err:?}");
-        };
-        assert!(message.contains("symlink"), "{message}");
-        assert_eq!(
-            std::fs::read_to_string(&victim).expect("victim"),
-            "original"
-        );
-    }
-}
-
-#[cfg(test)]
-mod hook_activity_context_tests {
-    use super::*;
-    use gitcomet_core::domain::CommitId;
-
-    #[test]
-    fn network_and_history_commands_have_specific_context() {
-        assert_eq!(
-            repo_command_context(&RepoCommandKind::Pull {
-                mode: PullMode::Rebase,
-            })
-            .as_deref(),
-            Some("Configured upstream → current branch · rebase")
-        );
-        assert_eq!(
-            repo_command_context(&RepoCommandKind::PushAfterCommit {
-                target: SafePushAfterCommitTarget {
-                    remote: "origin".to_string(),
-                    branch: "main".to_string(),
-                    local_branch: "feature/hooks".to_string(),
-                    local_head: CommitId("0123456789abcdef".into()),
-                },
-                set_upstream: false,
-            })
-            .as_deref(),
-            Some("feature/hooks → origin/main")
-        );
-        assert_eq!(
-            repo_command_context(&RepoCommandKind::SquashCommits {
-                oldest: CommitId("1111111111111111".into()),
-                expected_head: CommitId("2222222222222222".into()),
-                message: "Squash subject\n\nBody".to_string(),
-                count: 3,
-            })
-            .as_deref(),
-            Some("3 commits · Squash subject")
-        );
-    }
-
-    #[test]
-    fn remote_context_does_not_retain_a_credential_bearing_url() {
-        let context = repo_command_context(&RepoCommandKind::AddRemote {
-            name: "origin".to_string(),
-            url: "https://token@example.invalid/private.git".to_string(),
-        });
-        assert_eq!(context.as_deref(), Some("origin"));
-        assert!(!context.unwrap().contains("token"));
-    }
-}
-
 fn current_branch_context(
     thread_state: &Arc<RwLock<Arc<AppState>>>,
     repo_id: RepoId,
@@ -2964,10 +2786,18 @@ pub(super) fn schedule(
             repo_id,
             target,
             set_upstream,
+            hooks,
             auth,
-        } => {
-            schedule_push_after_commit(executor, repos, msg_tx, repo_id, target, set_upstream, auth)
-        }
+        } => schedule_push_after_commit(
+            executor,
+            repos,
+            msg_tx,
+            repo_id,
+            target,
+            set_upstream,
+            hooks,
+            auth,
+        ),
         RepoCommandEffect::ForcePush { repo_id, auth } => schedule_force_push(
             executor,
             repos,
@@ -3155,3 +2985,8 @@ pub(super) fn schedule(
         }
     }
 }
+
+#[cfg(test)]
+mod hook_activity_context_tests;
+#[cfg(test)]
+mod worktree_save_target_tests;

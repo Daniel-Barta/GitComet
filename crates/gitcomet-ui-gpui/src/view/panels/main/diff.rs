@@ -690,7 +690,7 @@ impl DiffRenderer {
         // The split's two sides share the width left of the scrollbar but for
         // the 1px divider, clamped like the text split's columns.
         let split_available =
-            (self.main_pane_content_width(cx) - scrollbar_gutter - px(1.0)).max(px(0.0));
+            (self.main_pane_content_width() - scrollbar_gutter - px(1.0)).max(px(0.0));
         let (split_left_w, _) = diff_split_column_widths_from_available(
             split_available,
             px(DIFF_SPLIT_COL_MIN_PX),
@@ -728,6 +728,7 @@ impl DiffRenderer {
                 layout: this.diff_markdown.layouts[side].clone(),
                 // Only the split's new side is parsed from the working-tree file.
                 disclosures: None,
+                flush_left: false,
                 tasks_editable: region == DiffTextRegion::SplitRight
                     && this.markdown_preview_tasks_editable(),
             };

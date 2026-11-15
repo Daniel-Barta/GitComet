@@ -1,5 +1,6 @@
 use super::*;
 use gitcomet_core::domain::Upstream;
+use gitcomet_extension_api::RefMenuTarget;
 
 pub(super) fn model(
     this: &PopoverHost,
@@ -174,38 +175,26 @@ pub(super) fn model(
                 label: name.clone(),
             }),
         });
-        if let Some(mark) = comparison_mark.filter(|mark| mark.commit_id != commit_id) {
-            items.push(ContextMenuItem::Entry {
-                label: format!("Compare with {}", mark.label).into(),
-                icon: Some("icons/open_external.svg".into()),
-                shortcut: None,
-                disabled: false,
-                action: Box::new(ContextMenuAction::CompareWithMarked {
-                    repo_id,
-                    commit_id: commit_id.clone(),
-                    label: name.clone(),
-                }),
-            });
-            items.push(ContextMenuItem::Entry {
-                label: "Compare with merge base".into(),
-                icon: Some("icons/open_external.svg".into()),
-                shortcut: None,
-                disabled: false,
-                action: Box::new(ContextMenuAction::CompareWithMergeBase {
-                    repo_id,
-                    commit_id: commit_id.clone(),
-                    label: name.clone(),
-                }),
-            });
-            items.push(ContextMenuItem::Entry {
-                label: "Clear comparison mark".into(),
-                icon: Some("icons/generic_close.svg".into()),
-                shortcut: None,
-                disabled: false,
-                action: Box::new(ContextMenuAction::ClearComparisonMark { repo_id }),
-            });
-        }
+        items.extend(super::marked_comparison_entries(
+            repo_id,
+            &commit_id,
+            &name,
+            comparison_mark
+                .as_ref()
+                .map(|mark| (&mark.commit_id, mark.label.as_str())),
+        ));
     }
+    items.extend(super::ref_menu::entries(
+        this,
+        repo_id,
+        match target {
+            BranchMenuTarget::Local { name } => RefMenuTarget::LocalBranch { name: name.clone() },
+            BranchMenuTarget::Remote { remote, branch } => RefMenuTarget::RemoteBranch {
+                remote: remote.clone(),
+                branch: branch.clone(),
+            },
+        },
+    ));
     // Focus sits with the other view-shaping entries, above the actions that
     // change the repository.
     items.push(super::focus::entry(

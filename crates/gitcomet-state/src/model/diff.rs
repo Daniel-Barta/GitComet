@@ -407,6 +407,22 @@ pub struct ConflictFile {
 }
 
 impl ConflictFile {
+    /// A conflict file at `path` with no stage or current content loaded.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn empty(path: impl Into<RepoPath>) -> Self {
+        Self {
+            path: path.into(),
+            base_bytes: None,
+            ours_bytes: None,
+            theirs_bytes: None,
+            current_bytes: None,
+            base: None,
+            ours: None,
+            theirs: None,
+            current: None,
+        }
+    }
+
     /// Build a conflict file from stage/current parts, canonicalizing UTF-8
     /// payloads down to text-only storage.
     pub fn from_loaded_stage_parts(
@@ -654,6 +670,17 @@ impl RepoState {
 
     pub(crate) fn bump_text_override_rev(&mut self) {
         self.diff_state.text_override_rev = self.diff_state.text_override_rev.wrapping_add(1);
+    }
+
+    /// Empty the diff pane: no target, no loads, no inline submodule or editor.
+    pub(crate) fn close_diff(&mut self) {
+        self.diff_state.inline_submodule_diff = None;
+        self.diff_state.content_preview = false;
+        self.diff_state.edit_mode = false;
+        self.diff_state.edit_return_view = None;
+        self.set_diff_target(None);
+        self.diff_state.clear_loads();
+        self.bump_diff_state_rev();
     }
 
     pub(crate) fn bump_diff_state_rev(&mut self) {

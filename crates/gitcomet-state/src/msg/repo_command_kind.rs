@@ -1,8 +1,8 @@
 use gitcomet_core::domain::{CommitId, Upstream};
 use gitcomet_core::services::MergeFastForward;
 use gitcomet_core::services::{
-    ConflictSide, ForcePushLease, InteractiveRebaseEntry, PullMode, RemoteUrlKind, ResetMode,
-    SafePushAfterCommitTarget, SubmoduleTrustTarget, WorktreeCheckout,
+    ConflictSide, ForcePushLease, GitHooks, InteractiveRebaseEntry, PullMode, RemoteUrlKind,
+    ResetMode, SafePushAfterCommitTarget, SubmoduleTrustTarget, WorktreeCheckout,
 };
 use std::path::PathBuf;
 
@@ -58,6 +58,7 @@ pub enum RepoCommandKind {
     PushAfterCommit {
         target: SafePushAfterCommitTarget,
         set_upstream: bool,
+        hooks: GitHooks,
     },
     ForcePush,
     ForcePushWithLease {

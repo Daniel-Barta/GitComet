@@ -11,9 +11,7 @@ macro_rules! match_git_auth {
     ($effect:expr, $auth:ident => $then:expr, $work:ident => $command:expr) => {
         match $effect {
             Effect::RepoCommand($work) => $command,
-            Effect::CloneRepo { auth: $auth, .. }
-            | Effect::Commit { auth: $auth, .. }
-            | Effect::CommitAmend { auth: $auth, .. } => $then,
+            Effect::CloneRepo { auth: $auth, .. } | Effect::Commit { auth: $auth, .. } => $then,
             _ => None,
         }
     };
@@ -182,8 +180,9 @@ pub enum Effect {
         to: Option<CommitId>,
         options: gitcomet_core::services::ComparisonOptions,
         /// Echoed back on the reply so a completion that lost a race against a
-        /// newer load can be dropped. See `HistoryState::range_files_request`.
-        request: u64,
+        /// newer load can be dropped (see `HistoryState::range_files_request`),
+        /// and the token that stops it.
+        load: crate::model::RangeFilesLoad,
     },
     LoadSquashMessagePreview {
         repo_id: RepoId,
@@ -347,13 +346,7 @@ pub enum Effect {
     },
     Commit {
         repo_id: RepoId,
-        message: String,
-        identity: Option<gitcomet_core::commit_identity::CommitIdentity>,
-        auth: Option<StagedGitAuth>,
-    },
-    CommitAmend {
-        repo_id: RepoId,
-        message: String,
+        request: crate::model::CommitRequest,
         identity: Option<gitcomet_core::commit_identity::CommitIdentity>,
         auth: Option<StagedGitAuth>,
     },
@@ -467,7 +460,6 @@ impl Effect {
             | Self::DiscardWorktreeChangesPath { .. }
             | Self::DiscardWorktreeChangesPaths { .. }
             | Self::Commit { .. }
-            | Self::CommitAmend { .. }
             | Self::PreviewTagPush { .. }
             | Self::LoadInteractiveRebaseSetup { .. }
             | Self::LoadInteractiveCherryPickMessages { .. }

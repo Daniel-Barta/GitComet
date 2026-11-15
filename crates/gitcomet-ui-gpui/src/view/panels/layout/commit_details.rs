@@ -6,12 +6,17 @@ use super::*;
 impl DetailsPaneView {
     pub(in crate::view) fn commit_details_view(
         &mut self,
+        window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         let active_repo_id = self.active_repo_id();
         let selected_id = self
             .active_repo()
             .and_then(|repo| repo.history_state.selected_commit.clone());
+
+        if self.review_details_dismissed {
+            return self.status_sections_view(cx);
+        }
 
         // A selected worktree row owns the pane outright: its files belong to a
         // different checkout, so none of the commit-detail views below apply.
@@ -49,7 +54,7 @@ impl DetailsPaneView {
 
         if let (Some(repo_id), Some(selected_id)) = (active_repo_id, selected_id) {
             self.retain_commit_reword_for(Some((repo_id, &selected_id)), cx);
-            return self.single_commit_details_view(repo_id, selected_id, cx);
+            return self.single_commit_details_view(repo_id, selected_id, window, cx);
         }
 
         self.retain_commit_reword_for(None, cx);
@@ -61,6 +66,7 @@ impl DetailsPaneView {
         &mut self,
         repo_id: RepoId,
         selected_id: CommitId,
+        window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         let theme = self.theme;
@@ -85,6 +91,7 @@ impl DetailsPaneView {
                     .text_size(theme.ui_text(14.0))
                     .font_weight(FontWeight::BOLD)
                     .line_clamp(1)
+                    .debug_selector(|| "commit_details_heading".to_string())
                     .child(header_title),
             )
             .child(
@@ -98,16 +105,8 @@ impl DetailsPaneView {
                         .debug_selector(|| "commit_details_close_icon".to_string()),
                     )
                     .style(components::ButtonStyle::Transparent)
-                    .on_click(theme, cx, |this, _e, _w, cx| {
-                        // The commit details and diff views are independent
-                        // panels; closing details must not close the diff.
-                        if let Some(repo_id) = this.active_repo_id() {
-                            this.store.dispatch(Msg::ClearCommitSelection {
-                                request_id: None,
-                                repo_id,
-                            });
-                        }
-                        cx.notify();
+                    .on_click(theme, cx, |this, _e, window, cx| {
+                        this.close_review_details(window, cx);
                     })
                     .gitcomet_tooltip(theme, "Close commit details".into()),
             );
@@ -150,11 +149,6 @@ impl DetailsPaneView {
                 if !current && show_delayed_loading {
                     components::empty_state(theme, "Commit", "Loading").into_any_element()
                 } else {
-                    let parent = details
-                        .parent_ids
-                        .first()
-                        .map(|p: &CommitId| p.as_ref().to_string())
-                        .unwrap_or_else(|| "—".to_string());
                     let find = self.commit_details_find_highlights(details);
 
                     if current {
@@ -166,39 +160,13 @@ impl DetailsPaneView {
                             &find.summary,
                             cx,
                         );
-                        self.sync_commit_details_sha_menu(
-                            details.id.as_ref(),
-                            repo_id,
-                            true,
-                            find.sha,
-                            theme,
-                            cx,
-                        );
                     } else {
                         self.sync_retained_commit_details_message_input(
                             details.message.as_str(),
                             &find.summary,
                             cx,
                         );
-                        self.sync_commit_details_sha_input(
-                            details.id.as_ref(),
-                            find.sha,
-                            theme,
-                            cx,
-                        );
                     }
-                    Self::sync_commit_details_input_value(
-                        &self.commit_details_date_input,
-                        self.commit_details_date_display(details).as_str(),
-                        cx,
-                    );
-                    self.sync_commit_details_parent_input(
-                        parent.as_str(),
-                        if current { repo_id } else { RepoId(0) },
-                        current && parent != "—",
-                        theme,
-                        cx,
-                    );
 
                     let message = if current {
                         let availability = self
@@ -214,13 +182,25 @@ impl DetailsPaneView {
                     } else {
                         self.commit_details_message_view(theme, repo_id)
                     };
+                    let card = self.commit_details_card(
+                        details,
+                        commit_signatures.get(&details.id),
+                        &find.author,
+                        find.sha,
+                        repo_id,
+                        current,
+                        window,
+                        cx,
+                    );
 
                     div()
                         .flex()
                         .flex_col()
+                        .gap_2()
                         .flex_1()
                         .h_full()
                         .min_h(px(0.0))
+                        .child(card)
                         .child(
                             div()
                                 .flex()
@@ -230,63 +210,6 @@ impl DetailsPaneView {
                                 .min_w(px(0.0))
                                 .pb_2()
                                 .child(message),
-                        )
-                        .children(
-                            commit_details_author_row(
-                                theme,
-                                ui_scale,
-                                details,
-                                commit_signatures.get(&details.id),
-                                &find.author,
-                            )
-                            .map(|row| {
-                                row.border_t_1()
-                                    .border_color(theme.colors.stroke.default)
-                                    .pt_2()
-                                    .pb_2()
-                            }),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .w_full()
-                                .min_w(px(0.0))
-                                .border_t_1()
-                                .border_color(theme.colors.stroke.default)
-                                .pt_2()
-                                .pb_2()
-                                .child(commit_details_selectable_row(
-                                    theme,
-                                    "Commit SHA",
-                                    commit_details_sha_value(
-                                        theme,
-                                        if current {
-                                            self.commit_details_sha_link_menu
-                                                .clone()
-                                                .into_any_element()
-                                        } else {
-                                            self.commit_details_sha_input.clone().into_any_element()
-                                        },
-                                        details.id.as_ref(),
-                                        &find,
-                                    ),
-                                ))
-                                .child(commit_details_selectable_row(
-                                    theme,
-                                    "Commit date",
-                                    commit_details_monospace_value(
-                                        self.commit_details_date_input.clone(),
-                                    ),
-                                ))
-                                .child(self.commit_details_parent_row(
-                                    &details.parent_ids,
-                                    repo_id,
-                                    current,
-                                    theme,
-                                    cx,
-                                )),
                         )
                         .child(self.commit_files_section(repo_id, commit_details_rev, details, cx))
                         .into_any_element()

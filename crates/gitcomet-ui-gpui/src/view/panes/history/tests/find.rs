@@ -458,7 +458,7 @@ fn secondary_f_over_history_opens_the_find_bar_and_focuses_its_input(
         "the history find bar is not the diff search"
     );
     assert_eq!(find_matches(cx, &view), Vec::<usize>::new());
-    assert_eq!(find_label(cx, &view), "Type to search");
+    assert_eq!(find_label(cx, &view), "No matches");
 }
 
 #[gpui::test]
@@ -585,7 +585,7 @@ fn history_find_matches_and_labels(cx: &mut gpui::TestAppContext) {
     );
     cx.simulate_keystrokes("secondary-a backspace");
     settle_typing(cx);
-    assert_eq!(find_label(cx, &view), "Type to search");
+    assert_eq!(find_label(cx, &view), "No matches");
     assert_eq!(find_matches(cx, &view), Vec::<usize>::new());
 }
 
@@ -1087,19 +1087,18 @@ fn mount_details_find_fixture(
     (view, cx, id)
 }
 
-/// Ranges of the details message (or SHA) field washed as find matches.
+/// Ranges of the details message washed as find matches.
 fn details_find_washes(
     cx: &mut gpui::VisualTestContext,
     view: &gpui::Entity<GitCometView>,
-    sha: bool,
 ) -> Vec<std::ops::Range<usize>> {
     cx.update(|_window, app| {
-        let pane = view.read(app).details_pane.read(app);
-        let input = if sha {
-            pane.commit_details_sha_input.clone()
-        } else {
-            pane.commit_details_message_input.clone()
-        };
+        let input = view
+            .read(app)
+            .details_pane
+            .read(app)
+            .commit_details_message_input
+            .clone();
         input.update(app, |input, _| {
             let len = input.text().len();
             input
@@ -1112,49 +1111,97 @@ fn details_find_washes(
     })
 }
 
+/// Whether the last frame drew the commit card's SHA chip washed as a match.
+fn details_sha_chip_washed(cx: &mut gpui::VisualTestContext) -> bool {
+    assert!(
+        cx.debug_bounds("commit_card_sha").is_some(),
+        "the commit card's SHA chip must be drawn"
+    );
+    cx.debug_bounds("commit_card_sha_find_wash").is_some()
+}
+
 /// The details pane follows the find bar: the summary match, the whole SHA
-/// for an abbreviation (shown beside it) or the full id, and nothing once the
-/// bar closes.
+/// for an abbreviation or the full id, and nothing once the bar closes.
 #[gpui::test]
 fn history_find_highlights_the_selected_commit_details(cx: &mut gpui::TestAppContext) {
     let (view, cx, id) = mount_details_find_fixture(cx);
-    let short_shown = |cx: &mut gpui::VisualTestContext| {
-        cx.debug_bounds("commit_details_sha_find_short").is_some()
-    };
-    assert!(details_find_washes(cx, &view, false).is_empty());
-    assert!(details_find_washes(cx, &view, true).is_empty());
+    assert!(details_find_washes(cx, &view).is_empty());
+    assert!(!details_sha_chip_washed(cx));
 
     open_find_with_shortcut(cx, &view);
     type_query(cx, "fix");
     assert_eq!(
-        details_find_washes(cx, &view, false),
+        details_find_washes(cx, &view),
         vec![0..3],
         "the summary match, not the body's"
     );
-    assert!(details_find_washes(cx, &view, true).is_empty());
-    assert!(!short_shown(cx));
+    assert!(!details_sha_chip_washed(cx));
 
     retype_query(cx, "AAAA0000");
-    assert_eq!(
-        details_find_washes(cx, &view, true),
-        vec![0..40],
-        "an abbreviation washes the whole id"
+    assert!(
+        details_sha_chip_washed(cx),
+        "an abbreviation washes the SHA chip"
     );
-    assert!(details_find_washes(cx, &view, false).is_empty());
-    assert!(short_shown(cx), "the abbreviation shows beside the full id");
+    assert!(details_find_washes(cx, &view).is_empty());
 
     retype_query(cx, &id);
-    assert_eq!(details_find_washes(cx, &view, true), vec![0..40]);
-    assert!(!short_shown(cx), "the full id needs no short form");
+    assert!(details_sha_chip_washed(cx), "so does the full id");
 
     cx.simulate_keystrokes("escape");
     draw_and_park(cx);
     assert!(!find_is_open(cx, &view));
     assert!(
-        details_find_washes(cx, &view, true).is_empty(),
+        !details_sha_chip_washed(cx),
         "closing the bar clears the wash"
     );
-    assert!(!short_shown(cx));
+}
+
+/// Selecting text in a second input must drop the highlight in the first, the
+/// way a browser only ever shows one selection.
+#[gpui::test]
+fn selecting_in_a_second_text_input_clears_the_first(cx: &mut gpui::TestAppContext) {
+    let (view, cx, _id) = mount_details_find_fixture(cx);
+    open_find_with_shortcut(cx, &view);
+    type_query(cx, "fix");
+    let find = find_input(cx, &view);
+    let message = cx.update(|_window, app| {
+        view.read(app)
+            .details_pane
+            .read(app)
+            .commit_details_message_input
+            .clone()
+    });
+    assert!(cx.debug_bounds("history_find").is_some());
+    assert!(
+        cx.debug_bounds("commit_details_message_scroll_surface")
+            .is_some()
+    );
+
+    cx.update(|window, app| {
+        message.update(app, |input, cx| input.select_all_text(window, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_window, app| message.read(app).selected_text()),
+        Some("Fix login bug\n\nThe fix needs a test.".to_string()),
+        "precondition: the message holds a selection"
+    );
+
+    cx.update(|window, app| {
+        find.update(app, |input, cx| input.select_all_text(window, cx));
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|_window, app| find.read(app).selected_text()),
+        Some("fix".to_string()),
+        "the newly selected input keeps its selection"
+    );
+    assert_eq!(
+        cx.update(|_window, app| message.read(app).selected_text()),
+        None,
+        "the previously selected input must have been cleared"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1475,17 +1522,16 @@ impl GitRepository for IndexedFindRepo {
         fn delete_branch(&self, name: &str) -> ();
         fn checkout_branch(&self, name: &str) -> ();
         fn checkout_commit(&self, id: &CommitId) -> ();
-        fn cherry_pick(&self, id: &CommitId) -> ();
         fn stash_create(&self, message: &str, include_untracked: bool) -> ();
 
         fn stash_apply(&self, index: usize) -> ();
         fn stash_drop(&self, index: usize) -> ();
         fn stage(&self, paths: &[&Path]) -> ();
         fn unstage(&self, paths: &[&Path]) -> ();
-        fn commit(&self, message: &str) -> ();
+        fn commit_with_outcome(&self, message: &str) -> gitcomet_core::services::CommitOperationOutcome;
 
 
-        fn push(&self) -> ();
+        fn push_with_output(&self) -> gitcomet_core::services::CommandOutput;
         fn discard_worktree_changes(&self, paths: &[&Path]) -> ();
     }
 }
@@ -2611,6 +2657,7 @@ fn history_find_reselecting_a_commit_leaves_range_comparison(cx: &mut gpui::Test
         to_label: "tip".into(),
         options: Default::default(),
         base: None,
+        source: gitcomet_state::model::ComparisonSource::Explicit,
     });
     let (view, store, cx) = mount_find_fixture(cx, repo);
     open_find_with_shortcut(cx, &view);
@@ -2761,7 +2808,7 @@ fn indexed_history_find_clearing_and_reopening_do_not_restore_a_stale_count(
     assert_eq!(find_label(cx, &view), "1/2");
     cx.simulate_keystrokes("secondary-a backspace");
     draw_and_park(cx);
-    assert_eq!(find_label(cx, &view), "Type to search");
+    assert_eq!(find_label(cx, &view), "No matches");
     type_query(cx, "bob");
     wait_for_find_request(cx, &view, &store, plain_query("bob"));
     assert_eq!(find_label(cx, &view), "Searching…");
@@ -2910,46 +2957,6 @@ fn history_find_toggle_deselect_uses_the_remaining_focus(cx: &mut gpui::TestAppC
     wait_for_selection(cx, &view, &store, "bbbb1111");
 }
 
-/// Ctrl+Shift-click pairs the anchor with the clicked commit and compares the
-/// two directly, where Ctrl-click would grow a merged-diff selection.
-#[gpui::test]
-fn history_ctrl_shift_click_compares_the_anchor_with_the_clicked_commit(
-    cx: &mut gpui::TestAppContext,
-) {
-    let tip = CommitId("aaaa0000".into());
-    let older = CommitId("cccc2222".into());
-    let mut repo = find_fixture_repo(find_fixture_commits());
-    repo.history_state.selected_commit = Some(tip.clone());
-    repo.history_state.multi_selection.commits = Arc::new(vec![tip.clone()]);
-    repo.history_state.multi_selection.anchor = Some(tip.clone());
-    let (view, store, cx) = mount_find_fixture(cx, repo);
-    let at = cx.debug_bounds("history_row_2").unwrap().center();
-    cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
-    cx.simulate_click(
-        at,
-        gpui::Modifiers {
-            control: true,
-            shift: true,
-            ..Default::default()
-        },
-    );
-    wait_for_selection(cx, &view, &store, "cccc2222");
-
-    let state = store.snapshot();
-    let history = &state.repos[0].history_state;
-    assert!(history.multi_selection.compare_pair);
-    assert_eq!(
-        *history.multi_selection.commits,
-        vec![tip.clone(), older.clone()]
-    );
-    let range = history
-        .range_selection
-        .as_ref()
-        .expect("a pair opens a comparison");
-    assert_eq!(range.from, older);
-    assert_eq!(range.to, Some(tip));
-}
-
 /// The fixture with an uncommitted change, so History lists its "Uncommitted
 /// changes" row above the commits (list row 0; commits start at row 1).
 fn find_fixture_repo_with_uncommitted_changes() -> RepoState {
@@ -3057,12 +3064,12 @@ fn history_find_stash_details_highlight_only_the_row_summary(cx: &mut gpui::Test
     type_query(cx, "main");
     settle_typing(cx);
     assert!(
-        details_find_washes(cx, &view, false).is_empty(),
+        details_find_washes(cx, &view).is_empty(),
         "the hidden stash prefix is not a match"
     );
     retype_query(cx, "saved");
     settle_typing(cx);
-    assert_eq!(details_find_washes(cx, &view, false), vec![13..18]);
+    assert_eq!(details_find_washes(cx, &view), vec![13..18]);
 }
 
 #[gpui::test]

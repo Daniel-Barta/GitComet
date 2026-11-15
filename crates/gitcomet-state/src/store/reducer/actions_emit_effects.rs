@@ -9,18 +9,17 @@ use crate::model::{
     AppState, InteractiveCherryPickSetup, InteractiveRebaseSetup, LoadKind, Loadable, RepoId,
     RepoState,
 };
-use crate::msg::{Effect, RepoCommandKind, RepoPathList};
+use crate::msg::{Effect, RepoCommandKind};
 use crate::msg::{ReferenceEffect, RepoCommandEffect};
 use crate::store::reducer::prepared::ReducerInputs;
 use crate::store::repository_runtime::RepositoryRuntimes;
 use gitcomet_core::auth::StagedGitAuth;
 use gitcomet_core::conflict_session::{ConflictRegionResolution, ConflictResolverStrategy};
-use gitcomet_core::domain::{DiffTarget, FileConflictKind, Upstream};
+use gitcomet_core::domain::{DiffTarget, FileConflictKind};
 use gitcomet_core::error::Error;
-use gitcomet_core::services::MergeFastForward;
 use gitcomet_core::services::{
-    CheckoutRemoteBranchMode, CommandOutput, InteractiveRebaseEntry, PullMode, RemoteUrlKind,
-    ResetMode, SafePushAfterCommitTarget, WorktreeCheckout,
+    CheckoutRemoteBranchMode, CommandOutput, GitHooks, InteractiveRebaseEntry, PullMode,
+    SafePushAfterCommitTarget,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,70 +41,6 @@ pub(super) fn checkout_remote_branch(
         branch,
         local_branch,
         mode,
-    }]
-}
-
-pub(super) fn checkout_commit(
-    repo_id: RepoId,
-    commit_id: gitcomet_core::domain::CommitId,
-) -> Vec<Effect> {
-    vec![Effect::CheckoutCommit { repo_id, commit_id }]
-}
-
-pub(super) fn cherry_pick_commit(
-    repo_id: RepoId,
-    commit_id: gitcomet_core::domain::CommitId,
-    commit: bool,
-    mainline: Option<usize>,
-    summary: String,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::CherryPickCommit {
-        repo_id,
-        commit_id,
-        commit,
-        mainline,
-        summary,
-        auth: None,
-    })]
-}
-
-pub(super) fn revert_commit(
-    repo_id: RepoId,
-    commit_id: gitcomet_core::domain::CommitId,
-    commit: bool,
-    mainline: Option<usize>,
-    summary: String,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::RevertCommit {
-        repo_id,
-        commit_id,
-        commit,
-        mainline,
-        summary,
-        auth: None,
-    })]
-}
-
-pub(super) fn apply_file_change(
-    repo_id: RepoId,
-    target: gitcomet_core::domain::ApplyChangeTarget,
-    commit: bool,
-    commit_retry: Option<gitcomet_core::domain::ApplyFileChangeRetry>,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::ApplyFileChange {
-        repo_id,
-        target,
-        commit,
-        commit_retry,
-        auth: None,
-    })]
-}
-
-pub(super) fn create_branch(repo_id: RepoId, name: String, target: String) -> Vec<Effect> {
-    vec![Effect::CreateBranch {
-        repo_id,
-        name,
-        target,
     }]
 }
 
@@ -139,77 +74,6 @@ pub(super) fn rename_branch(
 
 pub(super) fn delete_branch(repo_id: RepoId, name: String) -> Vec<Effect> {
     vec![Effect::DeleteBranch { repo_id, name }]
-}
-
-pub(super) fn force_delete_branch(repo_id: RepoId, name: String) -> Vec<Effect> {
-    vec![Effect::ForceDeleteBranch { repo_id, name }]
-}
-
-pub(super) fn delete_branches(repo_id: RepoId, names: Vec<String>, force: bool) -> Vec<Effect> {
-    vec![Effect::DeleteBranches {
-        repo_id,
-        names,
-        force,
-    }]
-}
-
-pub(super) fn export_patch(
-    repo_id: RepoId,
-    commit_id: gitcomet_core::domain::CommitId,
-    dest: PathBuf,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::ExportPatch {
-        repo_id,
-        commit_id,
-        dest,
-    })]
-}
-
-pub(super) fn apply_patch(repo_id: RepoId, patch: PathBuf) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::ApplyPatch {
-        repo_id,
-        patch,
-    })]
-}
-
-pub(super) fn add_worktree(
-    repo_id: RepoId,
-    path: PathBuf,
-    checkout: WorktreeCheckout,
-    open_after: bool,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::AddWorktree {
-        repo_id,
-        path,
-        checkout,
-        open_after,
-    })]
-}
-
-pub(super) fn remove_worktree(
-    repo_id: RepoId,
-    path: PathBuf,
-    delete_branch: Option<String>,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::RemoveWorktree {
-        repo_id,
-        path,
-        delete_branch,
-    })]
-}
-
-pub(super) fn force_remove_worktree(
-    repo_id: RepoId,
-    path: PathBuf,
-    delete_branch: Option<String>,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(
-        RepoCommandEffect::ForceRemoveWorktree {
-            repo_id,
-            path,
-            delete_branch,
-        },
-    )]
 }
 
 pub(super) fn add_submodule(
@@ -263,97 +127,14 @@ pub(super) fn load_submodule(
     })]
 }
 
-pub(super) fn change_submodule_pointer(
-    repo_id: RepoId,
-    path: PathBuf,
-    reference: String,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(
-        RepoCommandEffect::ChangeSubmodulePointer {
-            repo_id,
-            path,
-            reference,
-        },
-    )]
-}
-
-pub(super) fn remove_submodule(repo_id: RepoId, path: PathBuf) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::RemoveSubmodule {
-        repo_id,
-        path,
-    })]
-}
-
-pub(super) fn stage_path(repo_id: RepoId, path: PathBuf) -> Vec<Effect> {
-    vec![Effect::StagePath { repo_id, path }]
-}
-
-pub(super) fn stage_paths(repo_id: RepoId, paths: RepoPathList) -> Vec<Effect> {
-    vec![Effect::StagePaths { repo_id, paths }]
-}
-
-pub(super) fn unstage_path(repo_id: RepoId, path: PathBuf) -> Vec<Effect> {
-    vec![Effect::UnstagePath { repo_id, path }]
-}
-
-pub(super) fn unstage_paths(repo_id: RepoId, paths: RepoPathList) -> Vec<Effect> {
-    vec![Effect::UnstagePaths { repo_id, paths }]
-}
-
-pub(super) fn discard_worktree_changes_path(repo_id: RepoId, path: PathBuf) -> Vec<Effect> {
-    vec![Effect::DiscardWorktreeChangesPath { repo_id, path }]
-}
-
-pub(super) fn discard_worktree_changes_paths(repo_id: RepoId, paths: Vec<PathBuf>) -> Vec<Effect> {
-    vec![Effect::DiscardWorktreeChangesPaths { repo_id, paths }]
-}
-
-pub(super) fn save_worktree_file(
-    repo_id: RepoId,
-    path: PathBuf,
-    contents: crate::msg::ContentBytes,
-    expected_contents: Option<std::sync::Arc<[u8]>>,
-    stage: bool,
-    completion: Option<smol::channel::Sender<bool>>,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::SaveWorktreeFile {
-        repo_id,
-        path,
-        contents,
-        expected_contents,
-        stage,
-        completion,
-    })]
-}
-
-pub(super) fn append_gitignore_patterns(repo_id: RepoId, patterns: Vec<String>) -> Vec<Effect> {
-    vec![Effect::RepoCommand(
-        RepoCommandEffect::AppendGitignorePatterns { repo_id, patterns },
-    )]
-}
-
-pub(super) fn commit(repo_id: RepoId, message: String) -> Vec<Effect> {
-    vec![Effect::Commit {
-        repo_id,
-        message,
-        identity: None,
-        auth: None,
-    }]
-}
-
-pub(super) fn commit_amend(repo_id: RepoId, message: String) -> Vec<Effect> {
-    vec![Effect::CommitAmend {
-        repo_id,
-        message,
-        identity: None,
-        auth: None,
-    }]
-}
-
 pub(super) fn safe_push_after_commit(
+    state: &mut AppState,
     repo_id: RepoId,
     context: gitcomet_core::services::SafePushAfterCommitContext,
 ) -> Vec<Effect> {
+    if let Some(repo) = state.repos.iter_mut().find(|repo| repo.id == repo_id) {
+        repo.push_preflights_in_flight = repo.push_preflights_in_flight.saturating_add(1);
+    }
     vec![Effect::RepoCommand(
         RepoCommandEffect::SafePushAfterCommit {
             repo_id,
@@ -584,25 +365,6 @@ pub(super) fn pull_branch(
     })]
 }
 
-pub(super) fn merge_ref(
-    repo_id: RepoId,
-    reference: String,
-    fast_forward: MergeFastForward,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::MergeRef {
-        repo_id,
-        reference,
-        fast_forward,
-    })]
-}
-
-pub(super) fn squash_ref(repo_id: RepoId, reference: String) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::SquashRef {
-        repo_id,
-        reference,
-    })]
-}
-
 pub(super) fn push_with_tags(
     repos: &RepositoryRuntimes,
     state: &mut AppState,
@@ -635,8 +397,9 @@ pub(super) fn push_after_commit(
     repo_id: RepoId,
     target: SafePushAfterCommitTarget,
     set_upstream: bool,
+    hooks: GitHooks,
 ) -> Vec<Effect> {
-    push_after_commit_with_auth(repos, state, repo_id, target, set_upstream, None)
+    push_after_commit_with_auth(repos, state, repo_id, target, set_upstream, hooks, None)
 }
 
 fn push_after_commit_with_auth(
@@ -645,6 +408,7 @@ fn push_after_commit_with_auth(
     repo_id: RepoId,
     target: SafePushAfterCommitTarget,
     set_upstream: bool,
+    hooks: GitHooks,
     auth: Option<StagedGitAuth>,
 ) -> Vec<Effect> {
     bump_in_flight(repos, state, repo_id, InFlightKind::Push);
@@ -652,6 +416,7 @@ fn push_after_commit_with_auth(
         repo_id,
         target,
         set_upstream,
+        hooks,
         auth,
     })]
 }
@@ -698,24 +463,6 @@ pub(super) fn push_set_upstream(
     })]
 }
 
-pub(super) fn set_upstream_branch(
-    repo_id: RepoId,
-    branch: String,
-    upstream: Upstream,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::SetUpstreamBranch {
-        repo_id,
-        branch,
-        upstream,
-    })]
-}
-
-pub(super) fn unset_upstream_branch(repo_id: RepoId, branch: String) -> Vec<Effect> {
-    vec![Effect::RepoCommand(
-        RepoCommandEffect::UnsetUpstreamBranch { repo_id, branch },
-    )]
-}
-
 pub(super) fn delete_remote_branch(
     repos: &RepositoryRuntimes,
     state: &mut AppState,
@@ -748,14 +495,6 @@ pub(super) fn delete_remote_branches(
             auth: None,
         },
     )]
-}
-
-pub(super) fn reset(repo_id: RepoId, target: String, mode: ResetMode) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::Reset {
-        repo_id,
-        target,
-        mode,
-    })]
 }
 
 pub(super) fn squash_commits(
@@ -814,32 +553,6 @@ pub(super) fn squash_commits(
     }]
 }
 
-pub(super) fn rebase(repo_id: RepoId, onto: String) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::Rebase {
-        repo_id,
-        onto,
-    })]
-}
-
-pub(super) fn rebase_continue(repo_id: RepoId) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::RebaseContinue {
-        repo_id,
-        auth: None,
-    })]
-}
-
-pub(super) fn rebase_abort(repo_id: RepoId) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::RebaseAbort {
-        repo_id,
-    })]
-}
-
-pub(super) fn merge_abort(repo_id: RepoId) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::MergeAbort {
-        repo_id,
-    })]
-}
-
 pub(super) fn load_interactive_rebase_setup(
     state: &mut AppState,
     repo_id: RepoId,
@@ -852,19 +565,6 @@ pub(super) fn load_interactive_rebase_setup(
         });
     }
     vec![Effect::LoadInteractiveRebaseSetup { repo_id, base }]
-}
-
-pub(super) fn interactive_rebase(
-    repo_id: RepoId,
-    base: String,
-    entries: Vec<InteractiveRebaseEntry>,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::InteractiveRebase {
-        repo_id,
-        base,
-        entries,
-        interactive: true,
-    })]
 }
 
 pub(super) fn open_interactive_cherry_pick_setup(
@@ -892,20 +592,6 @@ pub(super) fn open_interactive_cherry_pick_setup(
     vec![]
 }
 
-pub(super) fn interactive_cherry_pick(
-    repo_id: RepoId,
-    entries: Vec<InteractiveRebaseEntry>,
-    commit: bool,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(
-        RepoCommandEffect::InteractiveCherryPick {
-            repo_id,
-            entries,
-            commit,
-        },
-    )]
-}
-
 pub(super) fn cancel_interactive_rebase_setup(
     state: &mut AppState,
     repo_id: RepoId,
@@ -924,29 +610,6 @@ pub(super) fn cancel_interactive_cherry_pick_setup(
         repo_state.interactive_cherry_pick_setup = None;
     }
     vec![]
-}
-
-pub(super) fn create_tag(
-    repo_id: RepoId,
-    name: String,
-    target: String,
-    message: Option<String>,
-    annotated: bool,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::CreateTag {
-        repo_id,
-        name,
-        target,
-        message,
-        annotated,
-    })]
-}
-
-pub(super) fn delete_tag(repo_id: RepoId, name: String) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::DeleteTag {
-        repo_id,
-        name,
-    })]
 }
 
 pub(super) fn push_tag(
@@ -981,96 +644,6 @@ pub(super) fn delete_remote_tag(
     })]
 }
 
-pub(super) fn add_remote(
-    repo_id: RepoId,
-    name: String,
-    url: String,
-    remote_url_policy: gitcomet_core::remote_url::RemoteUrlPolicy,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::AddRemote {
-        repo_id,
-        name,
-        url,
-        remote_url_policy,
-    })]
-}
-
-pub(super) fn remove_remote(repo_id: RepoId, name: String) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::RemoveRemote {
-        repo_id,
-        name,
-    })]
-}
-
-pub(super) fn set_remote_url(
-    repo_id: RepoId,
-    name: String,
-    url: String,
-    kind: RemoteUrlKind,
-    remote_url_policy: gitcomet_core::remote_url::RemoteUrlPolicy,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::SetRemoteUrl {
-        repo_id,
-        name,
-        url,
-        kind,
-        remote_url_policy,
-    })]
-}
-
-pub(super) fn checkout_conflict_side(
-    repo_id: RepoId,
-    path: PathBuf,
-    side: gitcomet_core::services::ConflictSide,
-) -> Vec<Effect> {
-    vec![Effect::RepoCommand(
-        RepoCommandEffect::CheckoutConflictSide {
-            repo_id,
-            path,
-            side,
-        },
-    )]
-}
-
-pub(super) fn accept_conflict_deletion(repo_id: RepoId, path: PathBuf) -> Vec<Effect> {
-    vec![Effect::RepoCommand(
-        RepoCommandEffect::AcceptConflictDeletion { repo_id, path },
-    )]
-}
-
-pub(super) fn checkout_conflict_base(repo_id: RepoId, path: PathBuf) -> Vec<Effect> {
-    vec![Effect::RepoCommand(
-        RepoCommandEffect::CheckoutConflictBase { repo_id, path },
-    )]
-}
-
-pub(super) fn launch_mergetool(repo_id: RepoId, path: PathBuf) -> Vec<Effect> {
-    vec![Effect::RepoCommand(RepoCommandEffect::LaunchMergetool {
-        repo_id,
-        path,
-    })]
-}
-
-pub(super) fn stash(repo_id: RepoId, message: String, include_untracked: bool) -> Vec<Effect> {
-    vec![Effect::Stash {
-        repo_id,
-        message,
-        include_untracked,
-    }]
-}
-
-pub(super) fn apply_stash(repo_id: RepoId, index: usize) -> Vec<Effect> {
-    vec![Effect::ApplyStash { repo_id, index }]
-}
-
-pub(super) fn pop_stash(repo_id: RepoId, index: usize) -> Vec<Effect> {
-    vec![Effect::PopStash { repo_id, index }]
-}
-
-pub(super) fn drop_stash(repo_id: RepoId, index: usize) -> Vec<Effect> {
-    vec![Effect::DropStash { repo_id, index }]
-}
-
 /// Drop any loaded blame once the content it describes is known to be stale —
 /// after a working-tree mutation (stage/unstage/apply patch/commit), after a
 /// reload whose result actually differed (`diff_loaded`/`diff_file_loaded`), or
@@ -1090,7 +663,7 @@ pub(super) fn invalidate_loaded_blame(repo_state: &mut RepoState) {
     }
 }
 
-/// Completion handling for `Msg::CommitFinished` / `Msg::CommitAmendFinished`.
+/// Completion handling for `InternalMsg::CommitFinished`.
 pub(super) fn commit_finished(
     inputs: &ReducerInputs,
     state: &mut AppState,
@@ -1100,7 +673,6 @@ pub(super) fn commit_finished(
     handled_by_prompt: bool,
 ) -> Vec<Effect> {
     let label = if amend { "Amend" } else { "Commit" };
-    let mut succeeded = false;
     let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
         return Vec::new();
     };
@@ -1112,7 +684,6 @@ pub(super) fn commit_finished(
     match result {
         Ok(()) => {
             repo_state.feedback_mut().last_error = None;
-            succeeded = true;
             repo_state.set_recent_commit_messages(Loadable::NotLoaded);
             repo_state.set_diff_target(None);
             repo_state.diff_state.clear_loads();
@@ -1145,15 +716,6 @@ pub(super) fn commit_finished(
             );
         }
     }
-    if succeeded {
-        let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
-            return Vec::new();
-        };
-        return refresh_primary_effects(repo_state);
-    }
-    let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
-        return Vec::new();
-    };
     refresh_primary_effects(repo_state)
 }
 
@@ -1162,22 +724,26 @@ pub(super) fn safe_push_after_commit_finished(
     repos: &RepositoryRuntimes,
     state: &mut AppState,
     repo_id: RepoId,
+    hooks: GitHooks,
     auth: Option<StagedGitAuth>,
     result: std::result::Result<gitcomet_core::services::SafePushAfterCommitDecision, Error>,
     handled_by_prompt: bool,
 ) -> Vec<Effect> {
+    if let Some(repo) = state.repos.iter_mut().find(|repo| repo.id == repo_id) {
+        repo.push_preflights_in_flight = repo.push_preflights_in_flight.saturating_sub(1);
+    }
     match result {
         Ok(gitcomet_core::services::SafePushAfterCommitDecision::Push { target }) => {
             if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
                 repo_state.pending.force_push_lease = None;
             }
-            push_after_commit_with_auth(repos, state, repo_id, target, false, auth)
+            push_after_commit_with_auth(repos, state, repo_id, target, false, hooks, auth)
         }
         Ok(gitcomet_core::services::SafePushAfterCommitDecision::PushSetUpstream { target }) => {
             if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
                 repo_state.pending.force_push_lease = None;
             }
-            push_after_commit_with_auth(repos, state, repo_id, target, true, auth)
+            push_after_commit_with_auth(repos, state, repo_id, target, true, hooks, auth)
         }
         Ok(gitcomet_core::services::SafePushAfterCommitDecision::Blocked { summary, lease }) => {
             let git_log_settings = state.git_log_settings;

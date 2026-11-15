@@ -224,6 +224,11 @@ pub fn refresh_history_page(
 /// to do; the run itself writes nothing to a pipe, so its output can't tell.
 pub const MAINTENANCE_CHECK_COMMAND: &str = "git maintenance is-needed --auto";
 
+/// What `git push --set-upstream` prints, still exiting 0, when the push went
+/// through but the upstream could not be saved (Git's `install_branch_config`).
+pub const UPSTREAM_CONFIG_WRITE_FAILED: &str =
+    "error: unable to write upstream branch configuration";
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CommandOutput {
     pub command: String,
@@ -529,12 +534,43 @@ pub struct RewordCommitOutcome {
     pub rewritten_id: Option<CommitId>,
 }
 
+/// Whether Git runs the repository's client-side verification hooks for one
+/// operation. `Skip` is Git's `--no-verify`: a commit bypasses `pre-commit`
+/// and `commit-msg`, a push bypasses `pre-push`. Other hooks still run.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum GitHooks {
+    #[default]
+    Run,
+    Skip,
+}
+
+impl GitHooks {
+    pub fn from_skip(skip: bool) -> Self {
+        if skip { Self::Skip } else { Self::Run }
+    }
+
+    pub fn skipped(self) -> bool {
+        self == Self::Skip
+    }
+}
+
+fn refuse_skipped_hooks(hooks: GitHooks) -> Result<()> {
+    if hooks.skipped() {
+        return Err(Error::new(ErrorKind::Unsupported(
+            "skipping Git hooks is not supported by this backend",
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SafePushAfterCommitContext {
     pub amend: bool,
     pub local_branch: Option<String>,
     pub pre_head: Option<CommitId>,
     pub post_head: Option<CommitId>,
+    /// The commit's hook choice, which the push after it keeps.
+    pub hooks: GitHooks,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1327,7 +1363,6 @@ pub trait GitRepository: Send + Sync {
         )))
     }
     fn checkout_commit(&self, id: &CommitId) -> Result<()>;
-    fn cherry_pick(&self, id: &CommitId) -> Result<()>;
     /// Runs a single cherry-pick. `mainline` is Git's 1-based parent number
     /// for a merge commit and must be `None` for non-merge commits.
     fn cherry_pick_with_output(
@@ -1390,19 +1425,11 @@ pub trait GitRepository: Send + Sync {
 
     fn stage(&self, paths: &[&Path]) -> Result<()>;
     fn unstage(&self, paths: &[&Path]) -> Result<()>;
-    fn commit(&self, message: &str) -> Result<()>;
-    fn commit_with_outcome(&self, message: &str) -> Result<CommitOperationOutcome> {
-        self.commit(message)?;
-        Ok(CommitOperationOutcome::default())
-    }
-    fn commit_amend(&self, _message: &str) -> Result<()> {
+    fn commit_with_outcome(&self, message: &str) -> Result<CommitOperationOutcome>;
+    fn commit_amend_with_outcome(&self, _message: &str) -> Result<CommitOperationOutcome> {
         Err(Error::new(ErrorKind::Unsupported(
             "commit amend is not implemented for this backend",
         )))
-    }
-    fn commit_amend_with_outcome(&self, message: &str) -> Result<CommitOperationOutcome> {
-        self.commit_amend(message)?;
-        Ok(CommitOperationOutcome::default())
     }
 
     /// Identity override for this operation. Existing implementations remain
@@ -1432,6 +1459,29 @@ pub trait GitRepository: Send + Sync {
             )));
         }
         self.commit_amend_with_outcome(message)
+    }
+
+    /// [`Self::commit_with_identity`] with a hook choice. A backend that
+    /// cannot skip hooks refuses instead of running them.
+    fn commit_with_hooks(
+        &self,
+        message: &str,
+        identity: Option<&crate::commit_identity::CommitIdentity>,
+        hooks: GitHooks,
+    ) -> Result<CommitOperationOutcome> {
+        refuse_skipped_hooks(hooks)?;
+        self.commit_with_identity(message, identity)
+    }
+    /// [`Self::commit_amend_with_identity`] with a hook choice. A backend that
+    /// cannot skip hooks refuses instead of running them.
+    fn commit_amend_with_hooks(
+        &self,
+        message: &str,
+        identity: Option<&crate::commit_identity::CommitIdentity>,
+        hooks: GitHooks,
+    ) -> Result<CommitOperationOutcome> {
+        refuse_skipped_hooks(hooks)?;
+        self.commit_amend_with_identity(message, identity)
     }
 
     fn rebase_with_output(&self, _onto: &str) -> Result<CommandOutput> {
@@ -1692,7 +1742,7 @@ pub trait GitRepository: Send + Sync {
         )))
     }
     fn pull(&self, mode: PullMode) -> Result<CommandOutput>;
-    fn push(&self) -> Result<()>;
+    fn push_with_output(&self) -> Result<CommandOutput>;
 
     fn push_with_tags(&self, _request: &crate::tag_push::TagPushRequest) -> Result<CommandOutput> {
         Err(Error::new(ErrorKind::Unsupported(
@@ -1710,17 +1760,6 @@ pub trait GitRepository: Send + Sync {
         )))
     }
 
-    fn push_force(&self) -> Result<()> {
-        Err(Error::new(ErrorKind::Unsupported(
-            "force push is not implemented for this backend",
-        )))
-    }
-    fn push_set_upstream(&self, _remote: &str, _branch: &str) -> Result<()> {
-        Err(Error::new(ErrorKind::Unsupported(
-            "pushing with --set-upstream is not implemented for this backend",
-        )))
-    }
-
     /// Fetches exactly `refspecs` from `remote` (for example
     /// `+refs/pull/7/head:refs/remotes/origin/pr/7`), pruning nothing.
     fn fetch_refspecs_with_output(
@@ -1733,14 +1772,10 @@ pub trait GitRepository: Send + Sync {
         )))
     }
 
-    fn push_with_output(&self) -> Result<CommandOutput> {
-        self.push()?;
-        Ok(CommandOutput::empty_success("git push"))
-    }
-
     fn push_force_with_output(&self) -> Result<CommandOutput> {
-        self.push_force()?;
-        Ok(CommandOutput::empty_success("git push --force-with-lease"))
+        Err(Error::new(ErrorKind::Unsupported(
+            "force push is not implemented for this backend",
+        )))
     }
 
     fn safe_push_after_commit(
@@ -1768,6 +1803,22 @@ pub trait GitRepository: Send + Sync {
         self.push_set_upstream_with_output(&target.remote, &target.branch)
     }
 
+    /// The push after a commit, with that commit's hook choice. A backend
+    /// that cannot skip hooks refuses instead of running them.
+    fn push_after_commit_with_hooks(
+        &self,
+        target: &SafePushAfterCommitTarget,
+        set_upstream: bool,
+        hooks: GitHooks,
+    ) -> Result<CommandOutput> {
+        refuse_skipped_hooks(hooks)?;
+        if set_upstream {
+            self.push_after_commit_set_upstream_with_output(target)
+        } else {
+            self.push_after_commit_with_output(target)
+        }
+    }
+
     fn push_force_with_lease_with_output(&self, lease: &ForcePushLease) -> Result<CommandOutput> {
         let _ = lease;
         Err(Error::new(ErrorKind::Unsupported(
@@ -1775,10 +1826,9 @@ pub trait GitRepository: Send + Sync {
         )))
     }
 
-    fn push_set_upstream_with_output(&self, remote: &str, branch: &str) -> Result<CommandOutput> {
-        self.push_set_upstream(remote, branch)?;
-        Ok(CommandOutput::empty_success(format!(
-            "git push --set-upstream {remote} HEAD:refs/heads/{branch}"
+    fn push_set_upstream_with_output(&self, _remote: &str, _branch: &str) -> Result<CommandOutput> {
+        Err(Error::new(ErrorKind::Unsupported(
+            "pushing with --set-upstream is not implemented for this backend",
         )))
     }
 
@@ -1827,11 +1877,6 @@ pub trait GitRepository: Send + Sync {
             last = self.delete_remote_branch_with_output(remote, branch)?;
         }
         Ok(last)
-    }
-
-    fn commit_amend_with_output(&self, message: &str) -> Result<CommandOutput> {
-        self.commit_amend(message)?;
-        Ok(CommandOutput::empty_success("git commit --amend"))
     }
 
     fn pull_branch_with_output(&self, _remote: &str, _branch: &str) -> Result<CommandOutput> {

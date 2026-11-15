@@ -1,9 +1,11 @@
 //! Collecting, validating, and freezing extension declarations.
 
 use crate::contributions::{
-    BottomPanelDescriptor, ChromeDescriptor, CloseGuard, CommandDescriptor, DetailsTabDescriptor,
-    MenuLocation, RepositoryEntryGate, RepositoryViewDescriptor, SettingsPageDescriptor,
-    SidebarSectionDescriptor, SidebarTabDescriptor, StatusItemDescriptor, WindowGateDescriptor,
+    BottomPanelDescriptor, CanvasOverlayDescriptor, ChromeDescriptor, CloseGuard,
+    CommandDescriptor, CommitBoxItemDescriptor, CrashReportAction, DetailsTabDescriptor,
+    MenuLocation, RefMenuItemDescriptor, RepositoryEntryGate, RepositoryViewDescriptor,
+    SettingsPageDescriptor, SidebarSectionDescriptor, SidebarTabDescriptor, StatusItemDescriptor,
+    UpdateCheckAction, WindowGateDescriptor,
 };
 use crate::id::{ContributionId, ExtensionId};
 use crate::{BarItemLocation, BuiltinBarItem, Extension, HistoryAnnotator};
@@ -64,6 +66,7 @@ pub struct Registrar {
     bar_item_locations: Vec<(BuiltinBarItem, BarItemLocation)>,
     repository_views: Vec<(ContributionId, RepositoryViewDescriptor)>,
     bottom_panels: Vec<(ContributionId, BottomPanelDescriptor)>,
+    canvas_overlays: Vec<(ContributionId, CanvasOverlayDescriptor)>,
     details_tabs: Vec<(ContributionId, DetailsTabDescriptor)>,
     sidebar_tabs: Vec<(ContributionId, SidebarTabDescriptor)>,
     sidebar_sections: Vec<(ContributionId, SidebarSectionDescriptor)>,
@@ -72,15 +75,19 @@ pub struct Registrar {
     edition_strip: Vec<(ContributionId, ChromeDescriptor)>,
     title_bar_brand: Vec<(ContributionId, ChromeDescriptor)>,
     status_items: Vec<(ContributionId, StatusItemDescriptor)>,
+    commit_box_items: Vec<(ContributionId, CommitBoxItemDescriptor)>,
     settings_pages: Vec<(ContributionId, SettingsPageDescriptor)>,
     commands: Vec<(ContributionId, CommandDescriptor)>,
     key_bindings: Vec<KeyBindingDeclaration>,
     menu_items: Vec<MenuItemDeclaration>,
+    ref_menu_items: Vec<(ContributionId, RefMenuItemDescriptor)>,
     assets: Vec<(String, &'static [u8])>,
     entry_gates: Vec<(ContributionId, RepositoryEntryGate)>,
     window_gates: Vec<(ContributionId, WindowGateDescriptor)>,
     close_guards: Vec<(ContributionId, CloseGuard)>,
     startup_workflows: Vec<(ContributionId, crate::StartupWorkflow)>,
+    crash_report_actions: Vec<(ContributionId, CrashReportAction)>,
+    update_check_actions: Vec<(ContributionId, UpdateCheckAction)>,
     errors: Vec<String>,
 }
 
@@ -91,6 +98,7 @@ impl Registrar {
             bar_item_locations: Vec::new(),
             repository_views: Vec::new(),
             bottom_panels: Vec::new(),
+            canvas_overlays: Vec::new(),
             details_tabs: Vec::new(),
             sidebar_tabs: Vec::new(),
             sidebar_sections: Vec::new(),
@@ -99,15 +107,19 @@ impl Registrar {
             edition_strip: Vec::new(),
             title_bar_brand: Vec::new(),
             status_items: Vec::new(),
+            commit_box_items: Vec::new(),
             settings_pages: Vec::new(),
             commands: Vec::new(),
             key_bindings: Vec::new(),
             menu_items: Vec::new(),
+            ref_menu_items: Vec::new(),
             assets: Vec::new(),
             entry_gates: Vec::new(),
             window_gates: Vec::new(),
             close_guards: Vec::new(),
             startup_workflows: Vec::new(),
+            crash_report_actions: Vec::new(),
+            update_check_actions: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -170,6 +182,19 @@ impl Registrar {
     ) -> &mut Self {
         if let Some(id) = self.id(local) {
             self.bottom_panels.push((id, descriptor));
+        }
+        self
+    }
+
+    /// Registers a view an extension can show over a repository's main
+    /// canvas with [`WindowHost::show_canvas_overlay`](crate::WindowHost::show_canvas_overlay).
+    pub fn canvas_overlay(
+        &mut self,
+        local: impl Into<Cow<'static, str>>,
+        descriptor: CanvasOverlayDescriptor,
+    ) -> &mut Self {
+        if let Some(id) = self.id(local) {
+            self.canvas_overlays.push((id, descriptor));
         }
         self
     }
@@ -273,6 +298,17 @@ impl Registrar {
         self
     }
 
+    pub fn commit_box_item(
+        &mut self,
+        local: impl Into<Cow<'static, str>>,
+        descriptor: CommitBoxItemDescriptor,
+    ) -> &mut Self {
+        if let Some(id) = self.id(local) {
+            self.commit_box_items.push((id, descriptor));
+        }
+        self
+    }
+
     pub fn settings_page(
         &mut self,
         local: impl Into<Cow<'static, str>>,
@@ -326,6 +362,19 @@ impl Registrar {
         self
     }
 
+    /// Adds an entry to every branch and commit menu; it receives the
+    /// branch or commit the menu was opened on.
+    pub fn ref_menu_item(
+        &mut self,
+        local: impl Into<Cow<'static, str>>,
+        descriptor: RefMenuItemDescriptor,
+    ) -> &mut Self {
+        if let Some(id) = self.id(local) {
+            self.ref_menu_items.push((id, descriptor));
+        }
+        self
+    }
+
     /// Serves `bytes` at `extensions/<extension id>/<path>` through the
     /// window's asset source (for `svg()`/`img()` paths).
     pub fn asset(&mut self, path: &str, bytes: &'static [u8]) -> &mut Self {
@@ -366,6 +415,37 @@ impl Registrar {
         self
     }
 
+    /// Replaces the crash banner's browser action with a native review flow.
+    /// At most one extension may provide it. The action remains available
+    /// without a repository or a satisfied window gate, and receives no raw log.
+    pub fn crash_report_action(
+        &mut self,
+        local: impl Into<Cow<'static, str>>,
+        action: CrashReportAction,
+    ) -> &mut Self {
+        if let Some(id) = self.id(local) {
+            self.crash_report_actions.push((id, action));
+        }
+        self
+    }
+
+    /// Runs "Check for updates" (the application menu, the in-window app menu
+    /// and the command palette) instead of the host's own check, and enables it
+    /// for a product whose identity names no update source. At most one
+    /// extension may provide it. The host's startup check, its setting and
+    /// `GITCOMET_NO_UPDATE_CHECK` stay the host's: they follow the identity's
+    /// update source alone and do not reach this check.
+    pub fn update_check(
+        &mut self,
+        local: impl Into<Cow<'static, str>>,
+        action: UpdateCheckAction,
+    ) -> &mut Self {
+        if let Some(id) = self.id(local) {
+            self.update_check_actions.push((id, action));
+        }
+        self
+    }
+
     pub fn close_guard(
         &mut self,
         local: impl Into<Cow<'static, str>>,
@@ -387,6 +467,7 @@ pub struct Registry {
     bar_item_locations: Vec<(BuiltinBarItem, BarItemLocation)>,
     repository_views: Vec<(ContributionId, RepositoryViewDescriptor)>,
     bottom_panels: Vec<(ContributionId, BottomPanelDescriptor)>,
+    canvas_overlays: Vec<(ContributionId, CanvasOverlayDescriptor)>,
     details_tabs: Vec<(ContributionId, DetailsTabDescriptor)>,
     sidebar_tabs: Vec<(ContributionId, SidebarTabDescriptor)>,
     sidebar_sections: Vec<(ContributionId, SidebarSectionDescriptor)>,
@@ -395,15 +476,19 @@ pub struct Registry {
     edition_strip: Vec<(ContributionId, ChromeDescriptor)>,
     title_bar_brand: Vec<(ContributionId, ChromeDescriptor)>,
     status_items: Vec<(ContributionId, StatusItemDescriptor)>,
+    commit_box_items: Vec<(ContributionId, CommitBoxItemDescriptor)>,
     settings_pages: Vec<(ContributionId, SettingsPageDescriptor)>,
     commands: Vec<(ContributionId, CommandDescriptor)>,
     key_bindings: Vec<KeyBindingDeclaration>,
     menu_items: Vec<MenuItemDeclaration>,
+    ref_menu_items: Vec<(ContributionId, RefMenuItemDescriptor)>,
     assets: Vec<(String, &'static [u8])>,
     entry_gates: Vec<(ContributionId, RepositoryEntryGate)>,
     window_gates: Vec<(ContributionId, WindowGateDescriptor)>,
     close_guards: Vec<(ContributionId, CloseGuard)>,
     startup_workflows: Vec<(ContributionId, crate::StartupWorkflow)>,
+    crash_report_actions: Vec<(ContributionId, CrashReportAction)>,
+    update_check_actions: Vec<(ContributionId, UpdateCheckAction)>,
 }
 
 impl Registry {
@@ -444,6 +529,7 @@ impl Registry {
             registry.instances.push(extension);
             registry.repository_views.extend(registrar.repository_views);
             registry.bottom_panels.extend(registrar.bottom_panels);
+            registry.canvas_overlays.extend(registrar.canvas_overlays);
             registry.details_tabs.extend(registrar.details_tabs);
             registry.sidebar_tabs.extend(registrar.sidebar_tabs);
             registry.sidebar_sections.extend(registrar.sidebar_sections);
@@ -454,12 +540,20 @@ impl Registry {
                 .sidebar_providers
                 .extend(registrar.sidebar_providers);
             registry.edition_strip.extend(registrar.edition_strip);
+            registry
+                .crash_report_actions
+                .extend(registrar.crash_report_actions);
+            registry
+                .update_check_actions
+                .extend(registrar.update_check_actions);
             registry.title_bar_brand.extend(registrar.title_bar_brand);
             registry.status_items.extend(registrar.status_items);
+            registry.commit_box_items.extend(registrar.commit_box_items);
             registry.settings_pages.extend(registrar.settings_pages);
             registry.commands.extend(registrar.commands);
             registry.key_bindings.extend(registrar.key_bindings);
             registry.menu_items.extend(registrar.menu_items);
+            registry.ref_menu_items.extend(registrar.ref_menu_items);
             registry.assets.extend(registrar.assets);
             registry.entry_gates.extend(registrar.entry_gates);
             registry.window_gates.extend(registrar.window_gates);
@@ -489,6 +583,10 @@ impl Registry {
                 duplicates(registry.bottom_panels.iter().map(|(id, _)| id)),
             ),
             (
+                "canvas overlay",
+                duplicates(registry.canvas_overlays.iter().map(|(id, _)| id)),
+            ),
+            (
                 "details tab",
                 duplicates(registry.details_tabs.iter().map(|(id, _)| id)),
             ),
@@ -513,12 +611,20 @@ impl Registry {
                 duplicates(registry.status_items.iter().map(|(id, _)| id)),
             ),
             (
+                "commit box item",
+                duplicates(registry.commit_box_items.iter().map(|(id, _)| id)),
+            ),
+            (
                 "settings page",
                 duplicates(registry.settings_pages.iter().map(|(id, _)| id)),
             ),
             (
                 "command",
                 duplicates(registry.commands.iter().map(|(id, _)| id)),
+            ),
+            (
+                "ref menu item",
+                duplicates(registry.ref_menu_items.iter().map(|(id, _)| id)),
             ),
             (
                 "entry gate",
@@ -550,20 +656,17 @@ impl Registry {
                 }
             }
         }
-        if registry.edition_strip.len() > 1 {
-            for (id, _) in registry.edition_strip.iter().skip(1) {
-                error(
-                    id.extension(),
-                    "edition_strip has more than one provider".to_string(),
-                );
-            }
-        }
-        if registry.title_bar_brand.len() > 1 {
-            for (id, _) in registry.title_bar_brand.iter().skip(1) {
-                error(
-                    id.extension(),
-                    "title_bar_brand has more than one provider".to_string(),
-                );
+        for (slot, ids) in [
+            (
+                "crash_report_action",
+                provider_ids(&registry.crash_report_actions),
+            ),
+            ("update_check", provider_ids(&registry.update_check_actions)),
+            ("edition_strip", provider_ids(&registry.edition_strip)),
+            ("title_bar_brand", provider_ids(&registry.title_bar_brand)),
+        ] {
+            for id in ids.into_iter().skip(1) {
+                error(id.extension(), format!("{slot} has more than one provider"));
             }
         }
         let commands: BTreeSet<&ContributionId> =
@@ -646,6 +749,10 @@ impl Registry {
         &self.bottom_panels
     }
 
+    pub fn canvas_overlays(&self) -> &[(ContributionId, CanvasOverlayDescriptor)] {
+        &self.canvas_overlays
+    }
+
     pub fn details_tabs(&self) -> &[(ContributionId, DetailsTabDescriptor)] {
         &self.details_tabs
     }
@@ -666,6 +773,16 @@ impl Registry {
         &self.sidebar_sections
     }
 
+    /// The crash banner's native report-review action, when provided.
+    pub fn crash_report_action(&self) -> Option<&CrashReportAction> {
+        self.crash_report_actions.first().map(|(_, action)| action)
+    }
+
+    /// The product's own update check, when provided.
+    pub fn update_check_action(&self) -> Option<&UpdateCheckAction> {
+        self.update_check_actions.first().map(|(_, action)| action)
+    }
+
     pub fn edition_strip(&self) -> Option<&ChromeDescriptor> {
         self.edition_strip.first().map(|(_, descriptor)| descriptor)
     }
@@ -678,6 +795,10 @@ impl Registry {
 
     pub fn status_items(&self) -> &[(ContributionId, StatusItemDescriptor)] {
         &self.status_items
+    }
+
+    pub fn commit_box_items(&self) -> &[(ContributionId, CommitBoxItemDescriptor)] {
+        &self.commit_box_items
     }
 
     pub fn settings_pages(&self) -> &[(ContributionId, SettingsPageDescriptor)] {
@@ -702,6 +823,11 @@ impl Registry {
         self.menu_items
             .iter()
             .filter(move |item| item.location == location)
+    }
+
+    /// Branch and commit menu entries, in registration order.
+    pub fn ref_menu_items(&self) -> &[(ContributionId, RefMenuItemDescriptor)] {
+        &self.ref_menu_items
     }
 
     pub fn asset(&self, path: &str) -> Option<&'static [u8]> {
@@ -730,6 +856,11 @@ impl Registry {
     pub fn close_guards(&self) -> &[(ContributionId, CloseGuard)] {
         &self.close_guards
     }
+}
+
+/// The contributors to a slot that takes one provider, in registration order.
+fn provider_ids<T>(slot: &[(ContributionId, T)]) -> Vec<&ContributionId> {
+    slot.iter().map(|(id, _)| id).collect()
 }
 
 #[cfg(test)]

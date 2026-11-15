@@ -186,6 +186,41 @@ impl DiffChangeSides {
     }
 }
 
+/// Where S leaves the outline once the diff it staged from reloads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::view) struct DiffStageAdvance {
+    /// Change blocks wholly above the staged lines. Staging leaves them as
+    /// they were, so after the reload the block at this position is the next.
+    pub(in crate::view) blocks_above: usize,
+    /// `diff_rev` and `diff_file_rev` when S was pressed: the reload moves them.
+    pub(in crate::view) revs: (u64, u64),
+}
+
+/// What an armed Stage, Unstage or Discard does to the open file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::view) enum OpenFileChange {
+    /// Lines or hunks: the diff stays on the file.
+    Part,
+    /// The whole file: the reducer closes its diff.
+    WholeFile,
+}
+
+/// Armed by Stage, Unstage or Discard on the open working-tree file. Decided
+/// once that action finished: if the file has left its list, the diff opens
+/// `next`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::view) struct NextFileAdvance {
+    pub(in crate::view) repo_id: RepoId,
+    pub(in crate::view) path: std::path::PathBuf,
+    pub(in crate::view) area: DiffArea,
+    pub(in crate::view) change: OpenFileChange,
+    /// The file's neighbour in its list when the action ran.
+    pub(in crate::view) next: std::path::PathBuf,
+    pub(in crate::view) section: StatusSection,
+    /// `ops_rev` before the action began; its start and finish move it.
+    pub(in crate::view) ops_rev: u64,
+}
+
 /// The change block F2/F3 last landed on, for the accent bar and outline
 /// that mark it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,6 +233,29 @@ pub(in crate::view) struct DiffFocusedChangeBlock {
     /// and the new column only if it adds something.
     pub(in crate::view) sides: DiffChangeSides,
     pub(in crate::view) layout: DiffVisibleLayoutKey,
+}
+
+/// The column the structural diff editor menu last opened in, so line keys
+/// pressed after it closes act on the lines it did: that column of the
+/// selected rows. Live only while everything that chose those lines is as the
+/// menu saw it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::view) struct DiffEditorMenuColumn {
+    pub(in crate::view) column: DiffTextRegion,
+    pub(in crate::view) seen: DiffLineSelectionState,
+}
+
+/// The selection and rows a line action is chosen from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::view) struct DiffLineSelectionState {
+    pub(in crate::view) target: Option<DiffTarget>,
+    pub(in crate::view) view: DiffViewMode,
+    pub(in crate::view) layout: DiffVisibleLayoutKey,
+    pub(in crate::view) content: (Option<u64>, Option<u64>),
+    pub(in crate::view) row_anchor: Option<usize>,
+    pub(in crate::view) rows: Option<(usize, usize)>,
+    pub(in crate::view) text: (Option<DiffTextPos>, Option<DiffTextPos>),
+    pub(in crate::view) block: Option<DiffFocusedChangeBlock>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -288,6 +346,15 @@ pub(in crate::view) struct DiffWrapVisualRow {
     pub(in crate::view) wrap_ix: usize,
     pub(in crate::view) primary_range: rows::DiffWrapByteRange,
     pub(in crate::view) secondary_range: rows::DiffWrapByteRange,
+}
+
+/// How a diff's list was built: its rows, and the row height they asked
+/// for at the window's scale factor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(in crate::view) struct DiffListBuilt {
+    pub(in crate::view) rows: usize,
+    pub(in crate::view) row_height: Pixels,
+    pub(in crate::view) scale_factor: f32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -437,21 +504,21 @@ pub(crate) struct DiffRenderer {
 
     // Display settings: whitespace, merge tool, diff view, blame, tabs, split.
     pub(in crate::view) reveal_whitespace_chars: bool,
-    /// section 30 merge tool: auto-advance to the next unresolved conflict after a
+    /// Merge tool: auto-advance to the next unresolved conflict after a
     /// source pick. Persisted UI setting (cog menu).
     pub(in crate::view) mergetool_auto_advance: bool,
-    /// section 30 merge tool: default for the collapse-unchanged-context mode when a
+    /// Merge tool: default for the collapse-unchanged-context mode when a
     /// conflicted file opens. Persisted UI setting (cog menu).
     pub(in crate::view) mergetool_collapse_unchanged: bool,
-    /// section 30 merge tool: sync the resolved output pane's scroll with the source
+    /// Merge tool: sync the resolved output pane's scroll with the source
     /// columns (in modes where they share a row space). Persisted UI setting
     /// (cog menu). Merge-tool-specific rather than a general diff setting
     /// because the resolver ships as a standalone tool.
     pub(in crate::view) mergetool_output_scroll_sync: bool,
-    /// section 30 merge tool: show per-column and resolved-output line number
+    /// Merge tool: show per-column and resolved-output line number
     /// gutters. Persisted UI setting (cog menu).
     pub(in crate::view) mergetool_show_line_numbers: bool,
-    /// section 30 merge tool: last-used view mode (true = 3-way). Fresh opens of
+    /// Merge tool: last-used view mode (true = 3-way). Fresh opens of
     /// base-present conflicts default to this; toolbar toggle persists it.
     pub(in crate::view) mergetool_view_three_way: bool,
     pub(in crate::view) diff_view: DiffViewMode,
@@ -533,6 +600,8 @@ pub(crate) struct DiffRenderer {
     // Diff panel focus, raw input, and submodule summary.
     pub(in crate::view) diff_panel_focus_handle: FocusHandle,
     pub(in crate::view) diff_autoscroll_pending: bool,
+    pub(in crate::view) review_file_jump: Option<super::super::review_navigation::ReviewFileJump>,
+    pub(in crate::view) review_position: Option<super::super::review_navigation::ReviewPosition>,
     pub(in crate::view) diff_raw_input: Entity<components::TextInput>,
     /// The error-text containers' scroll, so a drag selection can scroll them.
     pub(in crate::view) diff_raw_scroll: ScrollHandle,
@@ -576,6 +645,11 @@ pub(crate) struct DiffRenderer {
     pub(in crate::view) diff_selection_anchor: Option<usize>,
     pub(in crate::view) diff_selection_range: Option<(usize, usize)>,
     pub(in crate::view) diff_focused_change_block: Option<DiffFocusedChangeBlock>,
+    pub(in crate::view) diff_editor_menu_column: Option<DiffEditorMenuColumn>,
+    /// Set by S: outline the next change block once the diff reloads.
+    pub(in crate::view) diff_stage_advance: Option<DiffStageAdvance>,
+    /// Set by Stage, Unstage or Discard: open the next file once this one has no changes left.
+    pub(in crate::view) next_file_advance: Option<NextFileAdvance>,
     pub(in crate::view) diff_text_selecting: bool,
     pub(in crate::view) diff_text_anchor: Option<DiffTextPos>,
     pub(in crate::view) diff_text_head: Option<DiffTextPos>,
@@ -656,6 +730,8 @@ pub(crate) struct DiffRenderer {
     pub(in crate::view) diff_search_probe_action: u64,
     pub(in crate::view) diff_search_probe_render: u64,
     pub(in crate::view) diff_search_scroll: ScrollHandle,
+    /// The search bar's own layout: its width tier and overflow menu.
+    pub(in crate::view) diff_search_bar: std::rc::Rc<components::QuickSearchState>,
     pub(in crate::view) diff_search_input: Entity<components::TextInput>,
     pub(in crate::view::panes::diff) _diff_search_subscription: gpui::Subscription,
 
@@ -896,6 +972,7 @@ pub(crate) struct DiffRenderer {
     pub(in crate::view) file_editor_provider_theme_epoch: u64,
     /// Mirrors the settings window's toggle; the pane never writes it back.
     pub(in crate::view) auto_save_file_edits: bool,
+    pub(in crate::view) open_next_file_after_last_change: bool,
 
     // Merge conflict resolver: input, layout, caches, resolved output.
     pub(in crate::view) conflict_resolver_input: Entity<components::TextInput>,
@@ -1015,6 +1092,9 @@ pub(crate) struct DiffRenderer {
     // History view, scroll handles, and gutter geometry.
     pub(in crate::view) diff_scroll: UniformListScrollHandle,
     pub(in crate::view) diff_split_right_scroll: UniformListScrollHandle,
+    /// How the list on `diff_scroll` was last built, which its handle's
+    /// measured contents are of.
+    pub(in crate::view) diff_list_built: DiffListBuilt,
     pub(in crate::view) conflict_resolver_diff_scroll: UniformListScrollHandle,
     pub(in crate::view) conflict_preview_ours_scroll: UniformListScrollHandle,
     pub(in crate::view) conflict_preview_theirs_scroll: UniformListScrollHandle,

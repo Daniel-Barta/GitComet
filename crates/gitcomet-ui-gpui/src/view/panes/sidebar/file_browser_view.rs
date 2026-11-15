@@ -85,6 +85,7 @@ impl SidebarPaneView {
                         self.file_browser_scroll.clone(),
                     )
                     .auto_hide()
+                    .focus_on_press(self.explorer_focus.clone())
                     .render(theme),
                 )
                 .into_any_element()
@@ -678,6 +679,7 @@ impl SidebarPaneView {
                                 repo_id,
                                 ix,
                                 is_open: open_path.as_deref() == Some(path.as_path()),
+                                tooltip_host: this.tooltip_host.clone(),
                             },
                             Arc::clone(path),
                             scaled_px(6.0 + INDENT_STEP_PX),

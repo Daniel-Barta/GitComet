@@ -945,10 +945,11 @@ fn commit_finished_push_after_commit_enqueues_safe_push_only_on_success() {
     ));
     state.repos[0].local_actions_in_flight = 1;
     state.repos[0].commit_in_flight = 1;
-    state.repos[0].pending.commit_retry = Some(crate::model::PendingCommitRetry {
+    state.repos[0].pending.commit_retry = Some(crate::model::CommitRequest {
         message: "ship".to_string(),
         amend: false,
         push_after_commit: true,
+        hooks: gitcomet_core::services::GitHooks::Run,
     });
 
     let effects = reduce(
@@ -956,6 +957,12 @@ fn commit_finished_push_after_commit_enqueues_safe_push_only_on_success() {
         &id_alloc,
         &mut state,
         Msg::Internal(crate::msg::InternalMsg::CommitFinished {
+            request: crate::model::CommitRequest {
+                message: "ship".to_string(),
+                amend: false,
+                push_after_commit: true,
+                hooks: gitcomet_core::services::GitHooks::Run,
+            },
             repo_id,
             result: Ok(gitcomet_core::services::CommitOperationOutcome {
                 local_branch: Some("main".to_string()),
@@ -980,10 +987,11 @@ fn commit_finished_push_after_commit_enqueues_safe_push_only_on_success() {
     state.repos[0].push_in_flight = 0;
     state.repos[0].local_actions_in_flight = 1;
     state.repos[0].commit_in_flight = 1;
-    state.repos[0].pending.commit_retry = Some(crate::model::PendingCommitRetry {
+    state.repos[0].pending.commit_retry = Some(crate::model::CommitRequest {
         message: "ship".to_string(),
         amend: false,
         push_after_commit: true,
+        hooks: gitcomet_core::services::GitHooks::Run,
     });
 
     let effects = reduce(
@@ -991,6 +999,12 @@ fn commit_finished_push_after_commit_enqueues_safe_push_only_on_success() {
         &id_alloc,
         &mut state,
         Msg::Internal(crate::msg::InternalMsg::CommitFinished {
+            request: crate::model::CommitRequest {
+                message: "ship".to_string(),
+                amend: false,
+                push_after_commit: true,
+                hooks: gitcomet_core::services::GitHooks::Run,
+            },
             repo_id,
             result: Err(Error::new(ErrorKind::Backend("commit boom".to_string()))),
         }),
@@ -1001,6 +1015,232 @@ fn commit_finished_push_after_commit_enqueues_safe_push_only_on_success() {
         Effect::RepoCommand(RepoCommandEffect::SafePushAfterCommit { .. })
     )));
     assert_eq!(state.repos[0].push_in_flight, 0);
+}
+
+/// The push after a commit follows the request that commit was made with,
+/// even when another commit was started before it finished.
+#[test]
+fn a_finished_commit_pushes_by_its_own_request_not_the_latest_one() {
+    use gitcomet_core::services::GitHooks;
+
+    let mut repos: RepositoryRuntimes = Default::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::test_default();
+    let repo_id = RepoId(1);
+    repos.attach_repository_for_test(repo_id, Arc::new(DummyRepo::new("/tmp/repo")));
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    let first = crate::model::CommitRequest {
+        message: "first".to_string(),
+        amend: false,
+        push_after_commit: true,
+        hooks: GitHooks::Skip,
+    };
+    for request in [
+        first.clone(),
+        crate::model::CommitRequest {
+            message: "second".to_string(),
+            amend: false,
+            push_after_commit: false,
+            hooks: GitHooks::Run,
+        },
+    ] {
+        reduce(
+            &mut repos,
+            &id_alloc,
+            &mut state,
+            Msg::Commit { repo_id, request },
+        );
+    }
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::Internal(crate::msg::InternalMsg::CommitFinished {
+            repo_id,
+            request: first,
+            result: Ok(gitcomet_core::services::CommitOperationOutcome {
+                local_branch: Some("main".to_string()),
+                pre_head: Some(CommitId("1111111111111111111111111111111111111111".into())),
+                post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
+            }),
+        }),
+    );
+
+    let context = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::RepoCommand(RepoCommandEffect::SafePushAfterCommit { context, .. }) => {
+                Some(context.clone())
+            }
+            _ => None,
+        })
+        .expect("the first commit asked for a push");
+    assert_eq!(context.hooks, GitHooks::Skip);
+    assert_eq!(
+        state.repos[0]
+            .pending
+            .commit_retry
+            .as_ref()
+            .map(|pending| pending.message.as_str()),
+        Some("second"),
+        "the second commit is still pending"
+    );
+}
+
+#[test]
+fn skipped_hooks_follow_the_commit_to_the_push_after_it() {
+    use gitcomet_core::services::GitHooks;
+
+    let mut repos: RepositoryRuntimes = Default::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::test_default();
+    let repo_id = RepoId(1);
+    repos.attach_repository_for_test(repo_id, Arc::new(DummyRepo::new("/tmp/repo")));
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::Commit {
+            repo_id,
+            request: crate::model::CommitRequest {
+                amend: false,
+                message: "wip".to_string(),
+                push_after_commit: true,
+                hooks: GitHooks::Skip,
+            },
+        },
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Commit {
+                request: crate::model::CommitRequest {
+                    hooks: GitHooks::Skip,
+                    ..
+                },
+                ..
+            }]
+        ),
+        "{effects:?}"
+    );
+    assert_eq!(
+        state.repos[0]
+            .pending
+            .commit_retry
+            .as_ref()
+            .map(|retry| retry.hooks),
+        Some(GitHooks::Skip)
+    );
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::Internal(crate::msg::InternalMsg::CommitFinished {
+            request: crate::model::CommitRequest {
+                amend: false,
+                message: "wip".to_string(),
+                push_after_commit: true,
+                hooks: GitHooks::Skip,
+            },
+            repo_id,
+            result: Ok(gitcomet_core::services::CommitOperationOutcome {
+                local_branch: Some("main".to_string()),
+                pre_head: Some(CommitId("1111111111111111111111111111111111111111".into())),
+                post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
+            }),
+        }),
+    );
+    let context = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::RepoCommand(RepoCommandEffect::SafePushAfterCommit { context, .. }) => {
+                Some(context.clone())
+            }
+            _ => None,
+        })
+        .expect("the commit is pushed");
+    assert_eq!(context.hooks, GitHooks::Skip);
+
+    let target = gitcomet_core::services::SafePushAfterCommitTarget {
+        remote: "origin".to_string(),
+        branch: "main".to_string(),
+        local_branch: "main".to_string(),
+        local_head: CommitId("2222222222222222222222222222222222222222".into()),
+    };
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::Internal(crate::msg::InternalMsg::SafePushAfterCommitFinished {
+            repo_id,
+            context,
+            auth: None,
+            result: Ok(gitcomet_core::services::SafePushAfterCommitDecision::Push {
+                target: target.clone(),
+            }),
+        }),
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::RepoCommand(RepoCommandEffect::PushAfterCommit {
+                target: effect_target,
+                set_upstream: false,
+                hooks: GitHooks::Skip,
+                ..
+            }) if effect_target == &target
+        )),
+        "{effects:?}"
+    );
+
+    // A branch with no upstream yet keeps skipping hooks too.
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::Internal(crate::msg::InternalMsg::SafePushAfterCommitFinished {
+            repo_id,
+            context: gitcomet_core::services::SafePushAfterCommitContext {
+                amend: false,
+                local_branch: Some("main".to_string()),
+                pre_head: Some(CommitId("1111111111111111111111111111111111111111".into())),
+                post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
+                hooks: GitHooks::Skip,
+            },
+            auth: None,
+            result: Ok(
+                gitcomet_core::services::SafePushAfterCommitDecision::PushSetUpstream {
+                    target: target.clone(),
+                },
+            ),
+        }),
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::RepoCommand(RepoCommandEffect::PushAfterCommit {
+                target: effect_target,
+                set_upstream: true,
+                hooks: GitHooks::Skip,
+                ..
+            }) if effect_target == &target
+        )),
+        "{effects:?}"
+    );
 }
 
 #[test]
@@ -1040,6 +1280,7 @@ fn safe_push_after_commit_decision_push_enqueues_checked_push() {
                 local_branch: Some("main".to_string()),
                 pre_head: None,
                 post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
+                hooks: gitcomet_core::services::GitHooks::Run,
             },
             auth: Some(auth.clone()),
             result: Ok(gitcomet_core::services::SafePushAfterCommitDecision::Push {
@@ -1054,6 +1295,7 @@ fn safe_push_after_commit_decision_push_enqueues_checked_push() {
             repo_id: id,
             target: effect_target,
             set_upstream: false,
+            hooks: gitcomet_core::services::GitHooks::Run,
             auth: Some(effect_auth),
         }) if *id == repo_id && effect_target == &target && effect_auth == &auth
     )));
@@ -1091,6 +1333,7 @@ fn safe_push_after_commit_decision_push_set_upstream_enqueues_checked_push() {
                 local_branch: Some("feature".to_string()),
                 pre_head: None,
                 post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
+                hooks: gitcomet_core::services::GitHooks::Run,
             },
             auth: None,
             result: Ok(
@@ -1145,6 +1388,7 @@ fn safe_push_after_commit_published_amend_block_stores_lease_offer() {
                 local_branch: Some("main".to_string()),
                 pre_head: Some(expected.clone()),
                 post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
+                hooks: gitcomet_core::services::GitHooks::Run,
             },
             auth: None,
             result: Ok(
@@ -1205,6 +1449,7 @@ fn safe_push_after_commit_published_amend_lease_survives_followup_git_state_refr
                 local_branch: Some("main".to_string()),
                 pre_head: Some(expected),
                 post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
+                hooks: gitcomet_core::services::GitHooks::Run,
             },
             auth: None,
             result: Ok(

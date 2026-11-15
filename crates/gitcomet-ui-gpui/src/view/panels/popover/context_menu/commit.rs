@@ -358,7 +358,9 @@ fn model_with_header(
             icon: Some("icons/copy.svg".into()),
             shortcut: Some("C".into()),
             disabled: false,
-            action: Box::new(ContextMenuAction::CopyText { text: sha.clone() }),
+            action: Box::new(ContextMenuAction::CopyCommitSha {
+                commit_id: commit_id.clone(),
+            }),
         });
         let names = commit_branch_names_to_copy(this, repo_id, commit_id, refs);
         let single = names.len() == 1;
@@ -426,37 +428,21 @@ fn model_with_header(
             label: short.to_string(),
         }),
     });
-    if let Some(mark) = comparison_mark.filter(|mark| mark.commit_id != *commit_id) {
-        items.push(ContextMenuItem::Entry {
-            label: format!("Compare with {}", mark.label).into(),
-            icon: Some("icons/open_external.svg".into()),
-            shortcut: None,
-            disabled: false,
-            action: Box::new(ContextMenuAction::CompareWithMarked {
-                repo_id,
-                commit_id: commit_id.clone(),
-                label: short.to_string(),
-            }),
-        });
-        items.push(ContextMenuItem::Entry {
-            label: "Compare with merge base".into(),
-            icon: Some("icons/open_external.svg".into()),
-            shortcut: None,
-            disabled: false,
-            action: Box::new(ContextMenuAction::CompareWithMergeBase {
-                repo_id,
-                commit_id: commit_id.clone(),
-                label: short.to_string(),
-            }),
-        });
-        items.push(ContextMenuItem::Entry {
-            label: "Clear comparison mark".into(),
-            icon: Some("icons/generic_close.svg".into()),
-            shortcut: None,
-            disabled: false,
-            action: Box::new(ContextMenuAction::ClearComparisonMark { repo_id }),
-        });
-    }
+    items.extend(super::marked_comparison_entries(
+        repo_id,
+        commit_id,
+        short.as_ref(),
+        comparison_mark
+            .as_ref()
+            .map(|mark| (&mark.commit_id, mark.label.as_str())),
+    ));
+    items.extend(super::ref_menu::entries(
+        this,
+        repo_id,
+        gitcomet_extension_api::RefMenuTarget::Commit {
+            id: commit_id.clone(),
+        },
+    ));
     items.push(ContextMenuItem::Entry {
         label: "Export patch…".into(),
         icon: Some("icons/arrow_down.svg".into()),

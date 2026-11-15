@@ -1,4 +1,9 @@
+use super::repository_views::MainSlot;
 use super::*;
+
+/// A crash-report or update-check action: run with the window's host.
+type ExtensionWindowAction =
+    std::rc::Rc<dyn Fn(gitcomet_extension_api::WindowHost, &mut Window, &mut App)>;
 
 impl GitCometView {
     fn hook_activity_workflow_repo(kind: &PopoverKind) -> Option<RepoId> {
@@ -78,9 +83,8 @@ impl GitCometView {
             return;
         }
         kind.new_source = true;
+        self.dismiss_hover_popovers(cx);
         self.set_hook_activity_dialog_repo(Self::hook_activity_workflow_repo(&kind.kind), cx);
-        self.history_refs_hover_host
-            .update(cx, |host, cx| host.close(cx));
         self.popover_host.update(cx, |host, cx| {
             host.restore_history_binding();
             host.open_popover_at(kind, anchor, window, cx)
@@ -115,14 +119,13 @@ impl GitCometView {
             return;
         }
         kind.new_source = true;
+        self.dismiss_hover_popovers(cx);
         if let PopoverKind::HookActivity { repo_id, .. } = &kind.kind {
             self.pending_hook_activity_open = None;
             self.minimized_hook_activity_chains
                 .retain(|(suppressed_repo_id, _)| suppressed_repo_id != repo_id);
         }
         self.set_hook_activity_dialog_repo(Self::hook_activity_workflow_repo(&kind.kind), cx);
-        self.history_refs_hover_host
-            .update(cx, |host, cx| host.close(cx));
         self.popover_host.update(cx, |host, cx| {
             host.restore_history_binding();
             host.open_popover_centered(kind, window, cx);
@@ -150,9 +153,8 @@ impl GitCometView {
             return;
         }
         kind.new_source = true;
+        self.dismiss_hover_popovers(cx);
         self.set_hook_activity_dialog_repo(Self::hook_activity_workflow_repo(&kind.kind), cx);
-        self.history_refs_hover_host
-            .update(cx, |host, cx| host.close(cx));
         self.popover_host.update(cx, |host, cx| {
             host.restore_history_binding();
             host.open_popover_for_bounds(kind, anchor_bounds, window, cx)
@@ -172,6 +174,7 @@ impl GitCometView {
         if self.reveal_commit_open {
             self.close_reveal_commit(window, cx);
         }
+        self.dismiss_hover_popovers(cx);
         self.command_palette_open = true;
         let restore_focus = window
             .focused(cx)
@@ -223,6 +226,9 @@ impl GitCometView {
             repo_uses_annex: annex.is_some_and(|annex| annex.in_use()),
             annex_initialized: annex.is_some_and(|annex| annex.initialized()),
             annex_adjusted: repo.is_some_and(|repo| repo.annex_adjusted_branch().is_some()),
+            update_check: !super::manual_update_check_unavailable(
+                super::extension_host::provides_update_check(cx),
+            ),
         }
     }
 
@@ -260,11 +266,50 @@ impl GitCometView {
         }
     }
 
+    pub(crate) fn toggle_shortcut_help(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self
+            .popover_host
+            .read(cx)
+            .is_kind_open(&PopoverKind::KeyboardShortcuts)
+        {
+            self.popover_host.update(cx, |host, cx| {
+                host.close_popover_and_restore_focus(window, cx)
+            });
+            return;
+        }
+        if !command_palette_available(self.view_mode)
+            || self.is_overlay_open(cx)
+            || self.document_picker_open(cx)
+            || self.window_gated
+        {
+            return;
+        }
+        // Two scrim-backed modals never stack; closing first also hands back
+        // the focus the dialog returns to.
+        if self.command_palette_open {
+            self.close_command_palette(window, cx);
+        }
+        if self.reveal_commit_open {
+            self.close_reveal_commit(window, cx);
+        }
+        let request = PopoverRequest::from(PopoverKind::KeyboardShortcuts);
+        let request = match window.focused(cx) {
+            Some(focus) => request.returning_focus_to(focus),
+            None => request,
+        };
+        self.open_popover_centered(request, window, cx);
+    }
+
     pub(super) fn open_reveal_commit(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         // See `open_command_palette`: two stacked modal scrims are never right.
         if self.command_palette_open {
             self.close_command_palette(window, cx);
         }
+        self.dismiss_hover_popovers(cx);
         self.reveal_commit_open = true;
         let restore_focus = window
             .focused(cx)
@@ -296,14 +341,39 @@ impl GitCometView {
         let (Some(repo_id), Some(target)) = (self.active_repo_id(), target) else {
             return;
         };
+        self.reveal_commit_in_history(repo_id, target, cx);
+    }
+
+    /// Selects the commit and scrolls the history to its row, widening the log
+    /// to all branches when the current scope does not reach it.
+    pub(super) fn reveal_commit_in_history(
+        &mut self,
+        repo_id: RepoId,
+        commit_id: CommitId,
+        cx: &mut gpui::Context<Self>,
+    ) {
         self.main_pane.update(cx, |main, cx| {
             main.reveal_history_commit(
                 repo_id,
-                target,
+                commit_id,
                 Some(gitcomet_core::domain::LogScope::AllBranches),
                 cx,
             );
         });
+    }
+
+    /// Copies the full SHA and says so, since nothing on screen changes.
+    pub(super) fn copy_commit_sha(&mut self, commit_id: CommitId, cx: &mut gpui::Context<Self>) {
+        let message = format!(
+            "Commit {} copied to clipboard",
+            crate::view::caches::short_commit_sha(commit_id.as_ref())
+        );
+        crate::clipboard::write_text(
+            cx,
+            commit_id.as_ref().to_owned(),
+            crate::clipboard::CopySource::CommitSha,
+        );
+        self.push_toast(components::ToastKind::Success, message, cx);
     }
 
     pub(crate) fn toggle_reveal_commit(
@@ -332,6 +402,23 @@ impl GitCometView {
         self.popover_host.read(cx).is_open() || self.sidebar_collapsed_popover.is_some()
     }
 
+    pub(in crate::view) fn background_hovers_blocked(&self, cx: &App) -> bool {
+        self.is_overlay_open(cx)
+            || self.command_palette_open
+            || self.reveal_commit_open
+            || self.document_picker_open(cx)
+            || self.window_gated
+    }
+
+    pub(in crate::view) fn dismiss_hover_popovers(&mut self, cx: &mut gpui::Context<Self>) {
+        tooltip::dismiss_tooltips(cx);
+        self.tooltip_host.update(cx, |host, cx| {
+            host.clear_tooltip(cx);
+        });
+        self.dismiss_commit_message_hover(cx);
+        self.close_history_refs_hover(cx);
+    }
+
     pub(in crate::view) fn show_history_refs_hover(
         &mut self,
         repo_id: RepoId,
@@ -346,7 +433,9 @@ impl GitCometView {
         // handles mouse-move at the window level, so it still fires under the
         // overlay. If the open overlay is the hover's own item menu, leave the
         // existing hover in place.
-        if self.is_overlay_open(cx) && !self.history_refs_hover_host.read(cx).is_item_menu_open() {
+        if self.background_hovers_blocked(cx)
+            && !self.history_refs_hover_host.read(cx).is_item_menu_open()
+        {
             self.close_history_refs_hover(cx);
             return;
         }
@@ -364,7 +453,7 @@ impl GitCometView {
         // Same reasoning as the refs hover: the history canvas listens for
         // mouse-move at the window level, so it still fires under an open
         // overlay and the card would surface on top of it.
-        if self.is_overlay_open(cx) {
+        if self.background_hovers_blocked(cx) {
             self.dismiss_commit_message_hover(cx);
             return;
         }
@@ -1057,37 +1146,15 @@ impl GitCometView {
             cx.notify();
         });
 
-        let auth_prompt_username_input_subscription =
-            cx.observe(&auth_prompt_username_input, |this, input, cx| {
-                let enter_pressed = input.update(cx, |input, _| input.take_enter_pressed());
-                let escape_pressed = input.update(cx, |input, _| input.take_escape_pressed());
+        let auth_prompt_username_input_subscription = cx.observe(
+            &auth_prompt_username_input,
+            Self::on_auth_prompt_input_changed,
+        );
 
-                if escape_pressed {
-                    this.cancel_auth_prompt(cx);
-                    return;
-                }
-                if enter_pressed {
-                    this.try_auth_prompt_submit(cx);
-                    return;
-                }
-                cx.notify();
-            });
-
-        let auth_prompt_secret_input_subscription =
-            cx.observe(&auth_prompt_secret_input, |this, input, cx| {
-                let enter_pressed = input.update(cx, |input, _| input.take_enter_pressed());
-                let escape_pressed = input.update(cx, |input, _| input.take_escape_pressed());
-
-                if escape_pressed {
-                    this.cancel_auth_prompt(cx);
-                    return;
-                }
-                if enter_pressed {
-                    this.try_auth_prompt_submit(cx);
-                    return;
-                }
-                cx.notify();
-            });
+        let auth_prompt_secret_input_subscription = cx.observe(
+            &auth_prompt_secret_input,
+            Self::on_auth_prompt_input_changed,
+        );
 
         let scale = ui_scale::UiScale::from_percent(ui_scale.percent);
         let initial_sidebar_width_design =
@@ -1158,6 +1225,7 @@ impl GitCometView {
             _window_bounds_subscription: window_bounds_subscription,
             _appearance_subscription: appearance_subscription,
             _terminal_keystroke_interceptor: terminal_keystroke_interceptor,
+            keystroke_types_character: false,
             _auth_prompt_username_input_subscription: auth_prompt_username_input_subscription,
             _open_repo_input_subscription: open_repo_input_subscription,
             _home_subscription: home_subscription,
@@ -1189,6 +1257,7 @@ impl GitCometView {
             window_gated: false,
             extension_window,
             repository_view_focus: cx.focus_handle(),
+            canvas_overlay_focus: cx.focus_handle(),
             repository_views: Self::repository_view_router(cx),
             details_tabs: Self::details_tab_router(cx),
             sidebar_tabs: Self::sidebar_tab_router(cx),
@@ -1289,8 +1358,9 @@ impl GitCometView {
             sidebar_width_design: initial_sidebar_width_design,
             details_width_design: initial_details_width_design,
             sidebar_width: initial_sidebar_width,
-            sidebar_header_minimum: px(0.0),
-            sidebar_window_size_request: None,
+            sidebar_header_minimum: Default::default(),
+            details_header_minimum: Default::default(),
+            pane_window_size_request: None,
             _sidebar_header_subscription: sidebar_header_subscription,
             details_width: initial_details_width,
             sidebar_render_width: initial_sidebar_render_width,
@@ -1533,31 +1603,71 @@ impl GitCometView {
         Self::cubic_bezier(0.4, 0.0, 0.2, 1.0, t)
     }
 
-    pub(super) fn animate_sidebar_render_width_to(
+    /// Enter submits the auth prompt and Escape cancels it, from either field.
+    fn on_auth_prompt_input_changed(
         &mut self,
+        input: Entity<components::TextInput>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let enter_pressed = input.update(cx, |input, _| input.take_enter_pressed());
+        let escape_pressed = input.update(cx, |input, _| input.take_escape_pressed());
+        if escape_pressed {
+            self.cancel_auth_prompt(cx);
+            return;
+        }
+        if enter_pressed {
+            self.try_auth_prompt_submit(cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    /// The render width, animation sequence and animating flag of `pane`.
+    pub(super) fn side_pane_width_anim(
+        &mut self,
+        pane: SidePane,
+    ) -> (&mut Pixels, &mut u64, &mut bool) {
+        match pane {
+            SidePane::Sidebar => (
+                &mut self.sidebar_render_width,
+                &mut self.sidebar_width_anim_seq,
+                &mut self.sidebar_width_animating,
+            ),
+            SidePane::Details => (
+                &mut self.details_render_width,
+                &mut self.details_width_anim_seq,
+                &mut self.details_width_animating,
+            ),
+        }
+    }
+
+    /// Eases `pane`'s render width to `target`; a newer call cancels this one.
+    fn animate_side_pane_render_width_to(
+        &mut self,
+        pane: SidePane,
         target: Pixels,
         cx: &mut gpui::Context<Self>,
     ) {
-        let start = self.sidebar_render_width;
-        let start_f: f32 = start.into();
+        let (width, anim_seq, animating) = self.side_pane_width_anim(pane);
+        let start_f: f32 = (*width).into();
         let target_f: f32 = target.into();
-        self.sidebar_width_anim_seq = self.sidebar_width_anim_seq.wrapping_add(1);
-        let seq = self.sidebar_width_anim_seq;
+        *anim_seq = anim_seq.wrapping_add(1);
+        let seq = *anim_seq;
         if (start_f - target_f).abs() <= 0.5 {
-            self.sidebar_render_width = target;
-            self.sidebar_width_animating = false;
+            *width = target;
+            *animating = false;
             return;
         }
 
         if !crate::ui_runtime::current().uses_pane_animations() {
-            self.sidebar_render_width = target;
-            self.sidebar_width_animating = false;
+            *width = target;
+            *animating = false;
             self.refresh_main_pane_after_panel_animation(cx);
             cx.notify();
             return;
         }
 
-        self.sidebar_width_animating = true;
+        *animating = true;
         let started = Instant::now();
         let duration = Duration::from_millis(PANE_COLLAPSE_ANIM_MS);
 
@@ -1575,22 +1685,21 @@ impl GitCometView {
                 let mut done = t >= 1.0;
 
                 let _ = view.update(cx, |this, cx| {
-                    if this.sidebar_width_anim_seq != seq {
+                    let (width, anim_seq, animating) = this.side_pane_width_anim(pane);
+                    if *anim_seq != seq {
                         done = true;
                         return;
                     }
 
                     let mut changed = false;
                     let next_width = px(start_f + (target_f - start_f) * eased);
-                    if this.sidebar_render_width != next_width {
-                        this.sidebar_render_width = next_width;
+                    if *width != next_width {
+                        *width = next_width;
                         changed = true;
                     }
                     if t >= 1.0 {
-                        if this.sidebar_render_width != px(target_f) {
-                            this.sidebar_render_width = px(target_f);
-                        }
-                        this.sidebar_width_animating = false;
+                        *width = px(target_f);
+                        *animating = false;
                         this.refresh_main_pane_after_panel_animation(cx);
                         changed = true;
                     }
@@ -1607,78 +1716,15 @@ impl GitCometView {
         .detach();
     }
 
-    pub(super) fn animate_details_render_width_to(
+    /// Brings the History view to the main canvas, from a document or a
+    /// contributed view.
+    pub(in crate::view) fn show_history_view(
         &mut self,
-        target: Pixels,
+        window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        let start = self.details_render_width;
-        let start_f: f32 = start.into();
-        let target_f: f32 = target.into();
-        self.details_width_anim_seq = self.details_width_anim_seq.wrapping_add(1);
-        let seq = self.details_width_anim_seq;
-        if (start_f - target_f).abs() <= 0.5 {
-            self.details_render_width = target;
-            self.details_width_animating = false;
-            return;
-        }
-
-        if !crate::ui_runtime::current().uses_pane_animations() {
-            self.details_render_width = target;
-            self.details_width_animating = false;
-            self.refresh_main_pane_after_panel_animation(cx);
-            cx.notify();
-            return;
-        }
-
-        self.details_width_animating = true;
-        let started = Instant::now();
-        let duration = Duration::from_millis(PANE_COLLAPSE_ANIM_MS);
-
-        cx.spawn(
-            async move |view: WeakEntity<GitCometView>, cx: &mut gpui::AsyncApp| loop {
-                smol::Timer::after(Duration::from_millis(16)).await;
-
-                let mut t =
-                    started.elapsed().as_secs_f32() / duration.as_secs_f32().max(f32::EPSILON);
-                if !t.is_finite() {
-                    t = 1.0;
-                }
-                let t = t.clamp(0.0, 1.0);
-                let eased = Self::pane_collapse_ease(t);
-                let mut done = t >= 1.0;
-
-                let _ = view.update(cx, |this, cx| {
-                    if this.details_width_anim_seq != seq {
-                        done = true;
-                        return;
-                    }
-
-                    let mut changed = false;
-                    let next_width = px(start_f + (target_f - start_f) * eased);
-                    if this.details_render_width != next_width {
-                        this.details_render_width = next_width;
-                        changed = true;
-                    }
-                    if t >= 1.0 {
-                        if this.details_render_width != px(target_f) {
-                            this.details_render_width = px(target_f);
-                        }
-                        this.details_width_animating = false;
-                        this.refresh_main_pane_after_panel_animation(cx);
-                        changed = true;
-                    }
-                    if changed {
-                        cx.notify();
-                    }
-                });
-
-                if done {
-                    break;
-                }
-            },
-        )
-        .detach();
+        self.show_repository_canvas(cx);
+        self.select_routed_view(repository_views::RoutedArea::Main, None, window, cx);
     }
 
     /// Opens the file history tab for `path`; does nothing for an inactive repository.
@@ -1693,6 +1739,10 @@ impl GitCometView {
             return;
         }
         self.set_sidebar_collapsed(false, cx);
+        // The tab lists commits the History view shows. Shown before the tab
+        // is selected, since changing the view may select a sidebar tab of
+        // its own.
+        self.show_history_view(window, cx);
         self.file_history_pane
             .update(cx, |pane, cx| pane.open(repo_id, path, window, cx));
         self.sidebar_pane
@@ -1723,7 +1773,7 @@ impl GitCometView {
         if matches!(
             self.pane_resize,
             Some(PaneResizeState {
-                handle: PaneResizeHandle::Sidebar,
+                handle: SidePane::Sidebar,
                 ..
             })
         ) {
@@ -1745,7 +1795,7 @@ impl GitCometView {
         } else {
             self.sidebar_width
         };
-        self.animate_sidebar_render_width_to(target, cx);
+        self.animate_side_pane_render_width_to(SidePane::Sidebar, target, cx);
         // Persist so the sidebar reopens in the same state next launch.
         self.schedule_ui_settings_persist(cx);
         cx.notify();
@@ -1771,6 +1821,7 @@ impl GitCometView {
         section: CollapsedSidebarSection,
         cx: &mut gpui::Context<Self>,
     ) {
+        self.dismiss_hover_popovers(cx);
         self.sidebar_collapsed_popover = Some(section);
         self.sidebar_collapsed_popover_closing = None;
         self.sidebar_collapsed_popover_anim_seq =
@@ -1844,7 +1895,7 @@ impl GitCometView {
         if matches!(
             self.pane_resize,
             Some(PaneResizeState {
-                handle: PaneResizeHandle::Details,
+                handle: SidePane::Details,
                 ..
             })
         ) {
@@ -1863,7 +1914,7 @@ impl GitCometView {
         } else {
             self.details_width
         };
-        self.animate_details_render_width_to(target, cx);
+        self.animate_side_pane_render_width_to(SidePane::Details, target, cx);
         cx.notify();
     }
 
@@ -2304,11 +2355,47 @@ impl GitCometView {
             .filter(|url| !url.is_empty())
     }
 
+    pub(super) fn can_report_startup_crash(&self, cx: &App) -> bool {
+        self.startup_crash_report_issue_url().is_some()
+            || (self.extension_window.is_some()
+                && super::extension_host::registry(cx)
+                    .is_some_and(|registry| registry.crash_report_action().is_some()))
+    }
+
     /// The "Report Issue" button's whole body, so the button stays a one-liner
     /// and tests can drive the real sequence through
     /// [`Self::report_startup_crash_report_with`].
     pub(super) fn report_startup_crash_report(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.startup_crash_report.is_none() {
+            return;
+        }
+        if let Some(action) = super::extension_host::registry(cx)
+            .and_then(|registry| registry.crash_report_action().cloned())
+        {
+            self.run_extension_window_action(action, cx);
+            return;
+        }
         self.report_startup_crash_report_with(cx, |url| platform_open::open_url_blocking(&url));
+    }
+
+    /// Runs an extension's window-wide action once this view's borrow is
+    /// released, so the action may open a dialog or a window.
+    pub(super) fn run_extension_window_action(
+        &self,
+        action: ExtensionWindowAction,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(host) = self
+            .extension_window
+            .as_ref()
+            .map(|extension| extension.host())
+        else {
+            return;
+        };
+        let window = self.window_handle;
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| action(host, window, cx));
+        });
     }
 
     pub(super) fn report_startup_crash_report_with(
@@ -2351,31 +2438,90 @@ impl GitCometView {
     }
 
     /// The diff the diff keys (F1–F4, F7, Alt+Up/Down) act on: History's,
-    /// unless an extension's repository view is selected. Then it is the
-    /// hosted diff pane inside that view the user is engaged with, and with
-    /// none there the keys do nothing, rather than move History's hidden
-    /// selection.
+    /// unless an extension's canvas overlay covers it or an extension's
+    /// repository view is selected. Then it is the hosted diff pane inside
+    /// that overlay or view the user is engaged with, and with none there the
+    /// keys do nothing, rather than move History's hidden selection.
     pub(super) fn diff_shortcut_target(
         &self,
         window: &Window,
         cx: &App,
     ) -> Option<Entity<DiffRenderer>> {
-        let extension_view_selected = self
-            .repository_views
-            .as_ref()
-            .zip(self.active_repo())
-            .is_some_and(|(router, repo)| router.selected(repo).is_some());
-        if !extension_view_selected || self.documents_active {
-            return Some(self.diff_renderer.clone());
-        }
+        let scope = match self.main_slot() {
+            MainSlot::Document | MainSlot::History => return Some(self.diff_renderer.clone()),
+            MainSlot::Overlay(_) => &self.canvas_overlay_focus,
+            MainSlot::View(_) => &self.repository_view_focus,
+        };
         self.extension_window
             .as_ref()?
-            .diff_pane_for_keys(&self.repository_view_focus, window, cx)
+            .diff_pane_for_keys(scope, window, cx)
+    }
+
+    /// Cmd/Ctrl+F outside the side panes opens the search of the diff the
+    /// diff keys act on ([`Self::diff_shortcut_target`]): History's find or
+    /// diff search, or the hosted diff pane in the extension view or overlay
+    /// over History. With no pane there it opens nothing, rather than
+    /// History's hidden find, and the key goes on to the focused view.
+    pub(super) fn open_main_slot_search(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        match self.diff_shortcut_target(window, cx) {
+            Some(target) if target.entity_id() == self.diff_renderer.entity_id() => self
+                .main_pane
+                .update(cx, |pane, cx| pane.open_search_for_active_view(window, cx)),
+            Some(target) => {
+                target.update(cx, |pane, cx| pane.open_search_for_active_view(window, cx))
+            }
+            None => false,
+        }
+    }
+
+    /// F2/F3 step the open search of the side pane holding focus (the
+    /// sidebar's or the details pane's); false leaves them to the main pane.
+    pub(super) fn step_focused_pane_search(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if self.sidebar_pane.read(cx).contains_focus(window, cx) {
+            return self
+                .sidebar_pane
+                .update(cx, |pane, cx| pane.step_search(forward, window, cx));
+        }
+        if self.details_pane.read(cx).contains_focus(window, cx) {
+            return self
+                .details_pane
+                .update(cx, |pane, cx| pane.step_review_search(forward, window, cx));
+        }
+        false
+    }
+
+    /// Bare S or U pressed outside the diff, e.g. in the file list that
+    /// opened it: acts on the change block the diff outlines, if shown.
+    pub(crate) fn handle_outlined_change_line_key(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if self.documents_active {
+            return false;
+        }
+        self.diff_renderer.update(cx, |pane, cx| {
+            let Some(action) = pane.diff_line_action_for_key(keystroke) else {
+                return false;
+            };
+            pane.apply_outlined_block_line_action(action, window, cx)
+        })
     }
 
     pub(super) fn defer_search_match_navigation(
         &self,
         forward: bool,
+        pressed_in: NavKeyFocus,
         cx: &mut gpui::Context<Self>,
     ) {
         let view = cx.weak_entity();
@@ -2391,18 +2537,27 @@ impl GitCometView {
                 }) else {
                     return;
                 };
-                let handled = if target.entity_id() == primary {
-                    main.update(cx, |main, cx| main.navigate_search_match(forward, cx))
+                let (handled, in_diff) = if target.entity_id() == primary {
+                    let in_diff = !main.read(cx).history_is_active_surface(cx);
+                    let handled =
+                        main.update(cx, |main, cx| main.navigate_search_match(forward, cx));
+                    (handled, in_diff)
                 } else {
-                    target.update(cx, |pane, cx| {
+                    let handled = target.update(cx, |pane, cx| {
                         if forward {
                             pane.navigate_next_search_match_or_diff_change(cx)
                         } else {
                             pane.navigate_prev_search_match_or_diff_change(cx)
                         }
-                    })
+                    });
+                    (handled, true)
                 };
                 if handled {
+                    if in_diff && pressed_in == NavKeyFocus::Elsewhere {
+                        target.update(cx, |pane, cx| {
+                            pane.focus_diff_after_navigation(window, cx);
+                        });
+                    }
                     window.refresh();
                 }
             });
@@ -2473,12 +2628,16 @@ impl GitCometView {
         if !self.shell_action_allowed(super::shell_policy::ShellAction::Repository) {
             return;
         }
-        self.defer_text_input_main_pane_action(cx, move |pane, _window, cx| {
-            if previous {
+        self.defer_text_input_main_pane_action(cx, move |pane, window, cx| {
+            let handled = if previous {
                 pane.navigate_prev_diff_change(cx)
             } else {
                 pane.navigate_next_diff_change(cx)
+            };
+            if handled {
+                pane.focus_diff_after_navigation(window, cx);
             }
+            handled
         });
     }
 
@@ -2488,6 +2647,17 @@ impl GitCometView {
     pub(super) fn dispatch_global_nav(&self, forward: bool, cx: &mut gpui::Context<Self>) {
         if !self.shell_action_allowed(super::shell_policy::ShellAction::Repository) {
             return;
+        }
+        // Over a canvas overlay, Back uncovers the view behind and Forward
+        // waits: neither moves a view the user cannot see.
+        match self.main_slot() {
+            MainSlot::Overlay(_) => {
+                if !forward {
+                    self.hide_active_canvas_overlay(cx);
+                }
+                return;
+            }
+            MainSlot::Document | MainSlot::View(_) | MainSlot::History => {}
         }
         if self.route_extension_navigation(forward, cx) {
             return;
@@ -2787,4 +2957,11 @@ impl GitCometView {
             cx.notify();
         }
     }
+}
+
+/// Where a diff navigation key was pressed: a text field keeps its focus.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::view) enum NavKeyFocus {
+    TextInput,
+    Elsewhere,
 }

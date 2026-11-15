@@ -1,8 +1,8 @@
 use super::CancellationToken;
 use super::{
-    BlameLine, CheckoutRemoteBranchMode, CommandOutput, ConflictSide, GitBackend, GitRepository,
-    PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitTarget, UnavailableGitBackend,
-    decode_utf8_optional, validate_conflict_resolution_text,
+    BlameLine, CheckoutRemoteBranchMode, CommandOutput, ConflictSide, GitBackend, GitHooks,
+    GitRepository, PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitTarget,
+    UnavailableGitBackend, decode_utf8_optional, validate_conflict_resolution_text,
 };
 use crate::domain::{
     Branch, CommitDetails, CommitId, DiffArea, DiffTarget, HistoryMode, LogCursor, LogPage,
@@ -208,7 +208,7 @@ fn provided_trait_methods_use_unsupported_fallback_behavior() {
         "feature",
         CheckoutRemoteBranchMode::Create,
     ));
-    assert_unsupported(repo.commit_amend("message"));
+    assert_unsupported(repo.commit_amend_with_outcome("message"));
     assert_unsupported(repo.topologically_order_commits(std::slice::from_ref(&commit)));
     assert_unsupported(repo.compare_files(
         &commit,
@@ -249,12 +249,9 @@ fn provided_trait_methods_use_unsupported_fallback_behavior() {
     ));
     assert_unsupported(repo.fetch_all(true));
     assert_unsupported(repo.pull(PullMode::FastForwardOnly));
-    assert_unsupported(repo.push_with_output());
     assert_unsupported(repo.push_after_commit_with_output(&safe_push_target));
     assert_unsupported(repo.push_after_commit_set_upstream_with_output(&safe_push_target));
-    assert_unsupported(repo.push_force());
     assert_unsupported(repo.push_force_with_output());
-    assert_unsupported(repo.push_set_upstream("origin", "main"));
     assert_unsupported(repo.push_set_upstream_with_output("origin", "main"));
     assert_unsupported(repo.set_upstream_branch_with_output(
         "main",
@@ -265,7 +262,6 @@ fn provided_trait_methods_use_unsupported_fallback_behavior() {
     ));
     assert_unsupported(repo.unset_upstream_branch_with_output("main"));
     assert_unsupported(repo.delete_remote_branch_with_output("origin", "main"));
-    assert_unsupported(repo.commit_amend_with_output("message"));
     assert_unsupported(repo.pull_branch_with_output("origin", "main"));
     assert_unsupported(repo.merge_ref_with_output("origin/main"));
     assert_unsupported(repo.merge_ref_no_ff_with_output("origin/main"));
@@ -311,6 +307,63 @@ fn provided_trait_methods_use_unsupported_fallback_behavior() {
         repo.update_submodules_with_output(&[], crate::remote_url::RemoteUrlPolicy::default()),
     );
     assert_unsupported(repo.remove_submodule_with_output(path));
+}
+
+#[test]
+fn backends_that_cannot_skip_hooks_refuse_instead_of_running_them() {
+    fn unsupported_message<T: std::fmt::Debug>(result: super::Result<T>) -> &'static str {
+        match result.expect_err("operation must fail").kind() {
+            ErrorKind::Unsupported(message) => message,
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    let repo = UnconfiguredRepository::new("/tmp/hook-defaults");
+    let target = SafePushAfterCommitTarget {
+        remote: "origin".to_string(),
+        branch: "main".to_string(),
+        local_branch: "main".to_string(),
+        local_head: CommitId("abc123".into()),
+    };
+    let refused = "skipping Git hooks is not supported by this backend";
+
+    assert_eq!(
+        unsupported_message(repo.commit_with_hooks("message", None, GitHooks::Skip)),
+        refused
+    );
+    assert_eq!(
+        unsupported_message(repo.commit_amend_with_hooks("message", None, GitHooks::Skip)),
+        refused
+    );
+    for set_upstream in [false, true] {
+        assert_eq!(
+            unsupported_message(repo.push_after_commit_with_hooks(
+                &target,
+                set_upstream,
+                GitHooks::Skip
+            )),
+            refused
+        );
+    }
+
+    // Running hooks is the ordinary operation, which this repository lacks.
+    assert_ne!(
+        unsupported_message(repo.commit_with_hooks("message", None, GitHooks::Run)),
+        refused
+    );
+    assert_ne!(
+        unsupported_message(repo.commit_amend_with_hooks("message", None, GitHooks::Run)),
+        refused
+    );
+}
+
+#[test]
+fn git_hooks_default_runs_them() {
+    assert_eq!(GitHooks::default(), GitHooks::Run);
+    assert_eq!(GitHooks::from_skip(false), GitHooks::Run);
+    assert_eq!(GitHooks::from_skip(true), GitHooks::Skip);
+    assert!(GitHooks::Skip.skipped());
+    assert!(!GitHooks::Run.skipped());
 }
 
 #[test]
@@ -475,10 +528,6 @@ impl GitRepository for RecordingHistoryModeRepo {
         unsupported()
     }
 
-    fn cherry_pick(&self, _id: &CommitId) -> super::Result<()> {
-        unsupported()
-    }
-
     fn stash_create(&self, _message: &str, _include_untracked: bool) -> super::Result<()> {
         unsupported()
     }
@@ -507,7 +556,10 @@ impl GitRepository for RecordingHistoryModeRepo {
         unsupported()
     }
 
-    fn commit(&self, _message: &str) -> super::Result<()> {
+    fn commit_with_outcome(
+        &self,
+        _message: &str,
+    ) -> super::Result<crate::services::CommitOperationOutcome> {
         unsupported()
     }
 
@@ -521,7 +573,7 @@ impl GitRepository for RecordingHistoryModeRepo {
         result.map(|()| CommandOutput::empty_success("git pull"))
     }
 
-    fn push(&self) -> super::Result<()> {
+    fn push_with_output(&self) -> super::Result<CommandOutput> {
         unsupported()
     }
 

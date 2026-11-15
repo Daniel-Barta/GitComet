@@ -90,6 +90,12 @@ pub(in crate::view) enum ContextMenuAction {
         id: SharedString,
         repo_id: RepoId,
     },
+    /// An extension's branch or commit menu entry, for the menu's target.
+    RunRefMenuItem {
+        id: SharedString,
+        repo_id: RepoId,
+        target: gitcomet_extension_api::RefMenuTarget,
+    },
     SetImageSampling {
         mode: crate::view::image_preview::ImageSamplingMode,
     },
@@ -469,6 +475,9 @@ pub(in crate::view) enum ContextMenuAction {
     SetCommitPushAfterEnabled {
         enabled: bool,
     },
+    SetCommitSkipHooksEnabled {
+        enabled: bool,
+    },
     UseCommitMessage {
         message: String,
     },
@@ -648,6 +657,10 @@ pub(in crate::view) enum ContextMenuAction {
     CopyLinkAddress {
         url: String,
     },
+    /// Copy a commit's full SHA and confirm it with a toast.
+    CopyCommitSha {
+        commit_id: CommitId,
+    },
     /// Approve one repository-controlled remote image in the current Markdown
     /// preview. The pane re-checks that Ask mode is still active when invoked.
     LoadRemoteMarkdownImage {
@@ -759,6 +772,20 @@ struct ContextMenuModel {
     groups: Vec<std::ops::Range<usize>>,
 }
 
+#[cfg(test)]
+impl ContextMenuModel {
+    /// The labels of the model's entries, in order.
+    fn entry_labels(&self) -> Vec<&str> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                ContextMenuItem::Entry { label, .. } => Some(label.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 impl ContextMenuModel {
     fn new(items: Vec<ContextMenuItem>) -> Self {
         Self {
@@ -857,3 +884,4 @@ pub(in crate::view) use repo_tabs_bar::repo_tab_insert_before_for_drag_cursor;
 
 #[cfg(test)]
 mod tests;
+pub(in crate::view) use popover::compare_with_mark_label;

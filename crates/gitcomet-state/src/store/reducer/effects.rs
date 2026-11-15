@@ -1,11 +1,12 @@
 use super::util::{
-    EffectAccumulator, apply_selected_diff_load_plan_state, diff_reload_effects, push_diagnostic,
-    push_notification, selected_diff_load_plan,
+    EffectAccumulator, apply_selected_diff_load_plan_state, diff_reload_effects, error_loadable,
+    push_diagnostic, push_notification, selected_diff_load_plan,
 };
 use crate::model::{
-    AppNotificationKind, AppState, CommitMultiSelection, ConflictFileLoadMode, DiagnosticKind,
-    FileBrowserSettings, ForeignDiffOrigin, LoadKind, Loadable, PendingFileBrowserReopen,
-    RangeSelection, RepoId, RepoState, SidebarDataRequest, SidebarMode, WorktreeDirtyScope,
+    AppNotificationKind, AppState, CommitMultiSelection, ComparisonSource, ConflictFileLoadMode,
+    DiagnosticKind, FileBrowserSettings, ForeignDiffOrigin, LoadKind, Loadable,
+    PendingFileBrowserReopen, RangeSelection, RepoId, RepoState, SidebarDataRequest, SidebarMode,
+    WorktreeDirtyScope,
 };
 use crate::msg::{CommitSelectMode, Effect, WorktreeListRead};
 use crate::msg::{ReferenceEffect, RepoCommandEffect, StatusEffect};
@@ -43,10 +44,7 @@ pub(super) fn blame_loaded(
                 Some(prev) if *prev == v => prev,
                 _ => Arc::new(v),
             }),
-            Err(e) => {
-                push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                Loadable::Error(e.to_string())
-            }
+            Err(e) => error_loadable(inputs, repo_state, &e),
         };
     }
     Vec::new()
@@ -70,11 +68,11 @@ pub(super) fn worktrees_loaded(
                 Err(e) => {
                     // Only explicit loads publish errors. Cancelled replies are
                     // suppressed by the worker's repo-load guard.
-                    push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
+                    let failed = error_loadable(inputs, repo_state, &e);
                     // An unavailable listing is not evidence that the worktrees
                     // disappeared. Keep rows and badges until a read succeeds.
                     if !matches!(repo_state.worktrees, Loadable::Ready(_)) {
-                        repo_state.set_worktrees(Loadable::Error(e.to_string()));
+                        repo_state.set_worktrees(failed);
                     }
                 }
             }
@@ -353,8 +351,7 @@ pub(super) fn submodules_loaded(
                 if matches!(e.kind(), gitcomet_core::error::ErrorKind::Cancelled) {
                     Loadable::NotLoaded
                 } else {
-                    push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                    Loadable::Error(e.to_string())
+                    error_loadable(inputs, repo_state, &e)
                 }
             }
         };
@@ -416,36 +413,25 @@ pub(super) fn select_commit_multi(
 
     repo_state.set_commit_multi_selection(sel);
 
-    // Two or more consecutive commits enter "compare" mode: the details pane
-    // shows the merged diff of the whole selection — every selected commit's
-    // own changes, combined — instead of a plain list. A Ctrl/Cmd+Shift-click
-    // pair shows the direct diff between its two commits, or between its
-    // commit and the working tree, instead. A single commit, or a selection
-    // with no such diff (see `merged_selection_range`), falls back to the
-    // single/multi-list behavior below.
-    let range_pair = {
-        let selection = &repo_state.history_state.multi_selection;
-        let selected = &selection.commits;
-        if selection.working_tree {
-            selected.first().map(|commit| (commit.clone(), None))
-        } else if selection.compare_pair {
-            compare_pair_range(repo_state, selected).map(|(from, to)| (from, Some(to)))
-        } else {
-            (selected.len() >= 2)
-                .then(|| merged_selection_range(repo_state, selected))
-                .flatten()
-                .map(|(from, to)| (from, Some(to)))
-        }
+    // Two or more commits enter "compare" mode (see `selection_comparison`), as
+    // does a commit paired with the working tree; any other selection falls
+    // back to the single/multi-list behavior below.
+    let comparison = {
+        let selected = &repo_state.history_state.multi_selection.commits;
+        (selected.len() >= 2)
+            .then(|| selection_comparison(repo_state, None, selected))
+            .flatten()
+            .or_else(|| working_tree_comparison(&repo_state.history_state.multi_selection))
     };
 
-    let mut effects = match range_pair {
-        Some((from, to)) => {
+    let mut effects = match comparison {
+        Some(comparison) => {
             // Keep the focused commit selected (selection-derived UI stays
             // coherent) but don't load its details — the comparison view takes
             // over the details pane, so a single-commit detail load is wasted.
             // Leaving comparison mode is what reconciles the details pane again.
             repo_state.set_selected_commit(Some(focus));
-            compare_selection(state, repo_id, from, to)
+            enter_selection_comparison(state, repo_id, comparison)
         }
         None => {
             let left_comparison = repo_state.clear_range_comparison();
@@ -475,12 +461,155 @@ pub(super) fn select_commit_multi(
     effects
 }
 
+/// Open `comparison` for the multi-selection, unless it is already open: a
+/// right-click keeps the selection, and its loaded comparison stays.
+fn enter_selection_comparison(
+    state: &mut AppState,
+    repo_id: RepoId,
+    SelectionComparison { from, to, source }: SelectionComparison,
+) -> Vec<Effect> {
+    let to_label = to
+        .as_ref()
+        .map_or_else(|| WORKING_TREE_LABEL.to_string(), range_endpoint_label);
+    let next = RangeSelection {
+        source,
+        ..RangeSelection::new(from.clone(), to, range_endpoint_label(&from), to_label)
+    };
+    let open = state
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .and_then(|repo| repo.history_state.range_selection.as_ref())
+        .is_some_and(|range| range.same_comparison(&next) && range.source == source);
+    if open {
+        return Vec::new();
+    }
+    compare_range(
+        state,
+        repo_id,
+        next.from,
+        next.to,
+        next.from_label,
+        next.to_label,
+        source,
+    )
+}
+
+/// The multi-selection without the commits a reloaded log no longer lists.
+pub(super) struct PrunedSelection {
+    selection: CommitMultiSelection,
+    dropped: bool,
+    focus_gone: bool,
+}
+
+/// Drops the selected commits `listed` rejects. A reveal's target is exempt:
+/// it is selected ahead of the page that will contain it. So is an owned
+/// reword's target until its continuation settles. `None` for an empty
+/// selection: an explicit comparison's, whose stray focus is left alone.
+pub(super) fn prune_multi_selection(
+    repo: &RepoState,
+    listed: impl Fn(&CommitId) -> bool,
+) -> Option<PrunedSelection> {
+    if repo.history_state.multi_selection.commits.is_empty() {
+        return None;
+    }
+    let reveal = repo.history_state.reveal_target.as_ref();
+    let reword = repo
+        .history_state
+        .selected_commit
+        .as_ref()
+        .filter(|id| repo.reword.retains_selected_commit(id));
+    let survives = |id: &CommitId| reveal == Some(id) || reword == Some(id) || listed(id);
+    let mut selection = repo.history_state.multi_selection.clone();
+    let dropped = selection.commits.iter().any(|id| !survives(id));
+    if dropped {
+        Arc::make_mut(&mut selection.commits).retain(|id| survives(id));
+        // A working-tree pair loses its commit: the pair ends.
+        selection.working_tree = false;
+    }
+    if selection.anchor.as_ref().is_some_and(|id| !survives(id)) {
+        selection.anchor = None;
+    }
+    // Row indices may have shifted.
+    selection.anchor_index = None;
+    selection.anchor_log_rev = None;
+    Some(PrunedSelection {
+        selection,
+        dropped,
+        focus_gone: repo
+            .history_state
+            .selected_commit
+            .as_ref()
+            .is_some_and(|id| !survives(id)),
+    })
+}
+
+/// Applies `pruned`: the focus moves to a surviving commit, and a selection
+/// comparison is re-derived from the survivors, read against `index` when the
+/// reload built a new one.
+pub(super) fn apply_pruned_selection(
+    state: &mut AppState,
+    repo_id: RepoId,
+    PrunedSelection {
+        selection,
+        dropped,
+        focus_gone,
+    }: PrunedSelection,
+    index: Option<&gitcomet_core::history_index::HistoryIndexHandle>,
+) -> Vec<Effect> {
+    let Some(repo) = state.repos.iter_mut().find(|repo| repo.id == repo_id) else {
+        return Vec::new();
+    };
+    let refocus = focus_gone
+        .then(|| selection.commits.last().cloned())
+        .flatten();
+    let selected = Arc::clone(&selection.commits);
+    repo.set_commit_multi_selection(selection);
+    let from_selection = match repo
+        .history_state
+        .range_selection
+        .as_ref()
+        .map(|r| r.source)
+    {
+        Some(ComparisonSource::MergedSelection | ComparisonSource::SelectedPair) | None => true,
+        Some(ComparisonSource::Explicit) => false,
+    };
+    let mut left_comparison = false;
+    if dropped && from_selection {
+        if let Some(comparison) = (selected.len() >= 2)
+            .then(|| selection_comparison(repo, index, &selected))
+            .flatten()
+        {
+            if let Some(commit_id) = refocus {
+                repo.set_selected_commit(Some(commit_id));
+            }
+            return enter_selection_comparison(state, repo_id, comparison);
+        }
+        left_comparison = repo.clear_range_comparison();
+    }
+    if focus_gone {
+        let Some(commit_id) = refocus else {
+            repo.set_selected_commit(None);
+            repo.set_commit_details(Loadable::NotLoaded);
+            return Vec::new();
+        };
+        return select_commit_and_load_details(repo, repo_id, commit_id);
+    }
+    if left_comparison {
+        return reconcile_selected_commit_details(repo, repo_id);
+    }
+    Vec::new()
+}
+
 /// Emit a details load when the loaded commit details don't describe
 /// `selected_commit`. Entering comparison mode deliberately moves the selection
 /// without loading details, so every path that leaves comparison mode has to
 /// reconcile — otherwise the pane keeps rendering the previously loaded commit's
 /// message and file list under a different commit's selection.
-fn reconcile_selected_commit_details(repo_state: &mut RepoState, repo_id: RepoId) -> Vec<Effect> {
+pub(super) fn reconcile_selected_commit_details(
+    repo_state: &mut RepoState,
+    repo_id: RepoId,
+) -> Vec<Effect> {
     let Some(commit_id) = repo_state.history_state.selected_commit.clone() else {
         return Vec::new();
     };
@@ -494,32 +623,71 @@ fn reconcile_selected_commit_details(repo_state: &mut RepoState, repo_id: RepoId
     vec![Effect::LoadCommitDetails { repo_id, commit_id }]
 }
 
-/// Endpoints for the merged diff of a multi-commit selection. `to` is the newest
-/// selected commit; `from` is the *parent* of the oldest selected commit, so the
-/// combined patch includes every selected commit's own changes — matching the
-/// "merged diff of N commits" the comparison view presents. The history log is
-/// newest-first, so the smallest index is the newest commit and the largest is
-/// the oldest.
-///
-/// Falls back to the empty tree as `from` when the oldest selected commit is a
-/// root commit (no parent), so the changes it introduces are part of the merged
-/// diff like every other selected commit's — using the root itself as the base
-/// would silently drop them. Returns `None` unless the log is loaded and every
-/// selected commit resolves within it, so the caller leaves comparison mode
-/// rather than guess.
-///
-/// Also `None` unless the selection is one first-parent chain, each selected
-/// commit the first parent of the next newer one. Anything else — a gap, or
-/// commits on different branches — has no diff holding exactly the selected
-/// commits' changes: `from..to` would add every commit in between.
-fn merged_selection_range(
+struct SelectionComparison {
+    from: CommitId,
+    /// `None` for the working tree.
+    to: Option<CommitId>,
+    source: ComparisonSource,
+}
+
+/// A commit paired with the working tree by Ctrl/Cmd+Shift-click, compared
+/// exactly as the commit menu's "Compare with working tree" does, so both list
+/// the same files.
+fn working_tree_comparison(selection: &CommitMultiSelection) -> Option<SelectionComparison> {
+    let [commit] = selection.commits.as_slice() else {
+        return None;
+    };
+    selection.working_tree.then(|| SelectionComparison {
+        from: commit.clone(),
+        to: None,
+        source: ComparisonSource::SelectedPair,
+    })
+}
+
+/// A first-parent chain gets its merged diff: the oldest's parent (or the empty
+/// tree for a root) to the newest; with a gap `from..to` would add the commits
+/// in between. Any other two commits compare directly, older to newer, like
+/// `git diff a b`. `None` otherwise, or when a commit is not in the loaded log.
+fn selection_comparison(
     repo_state: &RepoState,
+    index: Option<&gitcomet_core::history_index::HistoryIndexHandle>,
     selected: &[CommitId],
-) -> Option<(CommitId, CommitId)> {
+) -> Option<SelectionComparison> {
+    let shape = selection_shape(repo_state, index, selected)?;
+    if shape.chain {
+        return Some(SelectionComparison {
+            from: shape
+                .oldest_parent
+                .or_else(|| empty_tree_id_like(&shape.oldest))?,
+            to: Some(shape.newest),
+            source: ComparisonSource::MergedSelection,
+        });
+    }
+    (shape.count == 2).then_some(SelectionComparison {
+        from: shape.oldest,
+        to: Some(shape.newest),
+        source: ComparisonSource::SelectedPair,
+    })
+}
+
+/// The selection resolved against the log, which lists newest first.
+struct SelectionShape {
+    newest: CommitId,
+    oldest: CommitId,
+    oldest_parent: Option<CommitId>,
+    count: usize,
+    /// Each selected commit is the first parent of the next newer one.
+    chain: bool,
+}
+
+fn selection_shape(
+    repo_state: &RepoState,
+    index: Option<&gitcomet_core::history_index::HistoryIndexHandle>,
+    selected: &[CommitId],
+) -> Option<SelectionShape> {
     let indexed = &repo_state.history_state.indexed;
-    if let Some(index) = indexed
-        .displayed_index
-        .as_ref()
+    if let Some(index) = index
+        .or(indexed.displayed_index.as_ref())
         .or(indexed.range_index.as_ref())
     {
         let positions: Option<Vec<usize>> = selected
@@ -527,25 +695,27 @@ fn merged_selection_range(
             .map(|id| index.position(id.as_ref()))
             .collect();
         if let Some(mut positions) = positions {
-            // Newest first, as the log lists them.
             positions.sort_unstable();
             positions.dedup();
-            let consecutive = positions.windows(2).all(|pair| {
+            let parent_of = |child: usize, parent: usize| {
                 index
-                    .parent_id_bytes(pair[0], 0)
-                    .is_some_and(|parent| Some(parent) == index.id_bytes(pair[1]))
-            });
-            if !consecutive {
-                return None;
+                    .parent_id_bytes(child, 0)
+                    .is_some_and(|id| Some(id) == index.id_bytes(parent))
+            };
+            let mut chain = positions.windows(2).all(|pair| parent_of(pair[0], pair[1]));
+            // Commit-time order can list a parent above its child.
+            if !chain && positions.windows(2).all(|pair| parent_of(pair[1], pair[0])) {
+                positions.reverse();
+                chain = true;
             }
-            let newest = *positions.first()?;
             let oldest = *positions.last()?;
-            return Some((
-                index
-                    .parent_commit_id(oldest, 0)
-                    .or_else(|| empty_tree_id_like(&index.commit_id(oldest)?))?,
-                index.commit_id(newest)?,
-            ));
+            return Some(SelectionShape {
+                newest: index.commit_id(*positions.first()?)?,
+                oldest: index.commit_id(oldest)?,
+                oldest_parent: index.parent_commit_id(oldest, 0),
+                count: positions.len(),
+                chain,
+            });
         }
     }
     let Loadable::Ready(page) = &repo_state.history_state.log else {
@@ -568,56 +738,20 @@ fn merged_selection_range(
     if found.len() != wanted.len() {
         return None;
     }
-    let consecutive = found
-        .windows(2)
-        .all(|pair| pair[0].parent_ids.first() == Some(&pair[1].id));
-    if !consecutive {
-        return None;
+    let parent_of = |child: &Commit, parent: &Commit| child.parent_ids.first() == Some(&parent.id);
+    let mut chain = found.windows(2).all(|pair| parent_of(pair[0], pair[1]));
+    // Commit-time order can list a parent above its child.
+    if !chain && found.windows(2).all(|pair| parent_of(pair[1], pair[0])) {
+        found.reverse();
+        chain = true;
     }
-    let newest = found.first()?;
     let oldest = found.last()?;
-    let from = oldest
-        .parent_ids
-        .first()
-        .cloned()
-        .or_else(|| empty_tree_id_like(&oldest.id))?;
-    Some((from, newest.id.clone()))
-}
-
-/// Endpoints for a Ctrl/Cmd+Shift-click pair, `[anchor, clicked]`: the direct
-/// diff from the older commit to the newer one, whichever was clicked first.
-/// The history log is newest-first, so the larger position is the older
-/// commit. A pair that cannot be placed in the log keeps click order, with the
-/// anchor as the base. `None` unless the selection is exactly two commits.
-fn compare_pair_range(
-    repo_state: &RepoState,
-    selected: &[CommitId],
-) -> Option<(CommitId, CommitId)> {
-    let [anchor, clicked] = selected else {
-        return None;
-    };
-    let indexed = &repo_state.history_state.indexed;
-    let positions = indexed
-        .displayed_index
-        .as_ref()
-        .or(indexed.range_index.as_ref())
-        .and_then(|index| {
-            index
-                .position(anchor.as_ref())
-                .zip(index.position(clicked.as_ref()))
-        })
-        .or_else(|| {
-            let Loadable::Ready(page) = &repo_state.history_state.log else {
-                return None;
-            };
-            let position = |id: &CommitId| page.commits.iter().position(|c| c.id == *id);
-            position(anchor).zip(position(clicked))
-        });
-    Some(match positions {
-        Some((anchor_pos, clicked_pos)) if anchor_pos < clicked_pos => {
-            (clicked.clone(), anchor.clone())
-        }
-        _ => (anchor.clone(), clicked.clone()),
+    Some(SelectionShape {
+        newest: found.first()?.id.clone(),
+        oldest: oldest.id.clone(),
+        oldest_parent: oldest.parent_ids.first().cloned(),
+        count: found.len(),
+        chain,
     })
 }
 
@@ -632,31 +766,6 @@ fn range_endpoint_label(id: &CommitId) -> String {
         return "start of history".to_string();
     }
     full.get(..8).unwrap_or(full).to_string()
-}
-
-/// Compare a history selection's endpoints. A `to` of `None` is the working
-/// tree, compared exactly as the commit menu's "Compare with working tree"
-/// does, so both list the same files.
-fn compare_selection(
-    state: &mut AppState,
-    repo_id: RepoId,
-    from: CommitId,
-    to: Option<CommitId>,
-) -> Vec<Effect> {
-    let from_label = range_endpoint_label(&from);
-    let to_label = match &to {
-        Some(to) => range_endpoint_label(to),
-        None => WORKING_TREE_LABEL.to_string(),
-    };
-    compare_range(
-        state,
-        repo_id,
-        from,
-        to,
-        from_label,
-        to_label,
-        ComparisonSource::MultiSelection,
-    )
 }
 
 /// Ctrl/Cmd+Shift-click on the "Uncommitted changes" row: compare the anchor
@@ -676,26 +785,15 @@ pub(super) fn compare_anchor_with_working_tree(
     else {
         return clear_commit_selection(state, repo_id);
     };
+    let comparison = working_tree_comparison(&sel);
     let commit = sel.commits[0].clone();
     repo_state.set_commit_multi_selection(sel);
     // Selected but not loaded: the comparison takes over the details pane, as
-    // it does for a pair of commits.
-    repo_state.set_selected_commit(Some(commit.clone()));
-    compare_selection(state, repo_id, commit, None)
-}
-
-/// Where a comparison came from, which decides whether the multi-selection
-/// describes it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ComparisonSource {
-    /// The multi-selection *is* the comparison — its merged diff. The selection
-    /// stays, and the UI names the comparison after it.
-    MultiSelection,
-    /// An explicit two-point compare: mark/compare, a branch, a tag, or the
-    /// working tree. Any multi-selection left over from earlier clicks describes
-    /// something else entirely, so it is dropped rather than left to mislabel
-    /// the comparison and supply the wrong preview cards.
-    Explicit,
+    // it does for a multi-selection.
+    repo_state.set_selected_commit(Some(commit));
+    comparison.map_or_else(Vec::new, |comparison| {
+        enter_selection_comparison(state, repo_id, comparison)
+    })
 }
 
 /// Enter "compare two points" mode: record the ordered `from`/`to` pair and load
@@ -737,15 +835,19 @@ pub(super) fn compare_range_with_options(
     options: gitcomet_core::services::ComparisonOptions,
     source: ComparisonSource,
 ) -> Vec<Effect> {
-    let request = {
+    let load = {
         let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
             return Vec::new();
         };
-        if source == ComparisonSource::Explicit {
-            repo_state.set_commit_multi_selection(CommitMultiSelection::default());
+        match source {
+            ComparisonSource::Explicit => {
+                repo_state.set_commit_multi_selection(CommitMultiSelection::default());
+            }
+            ComparisonSource::MergedSelection | ComparisonSource::SelectedPair => {}
         }
         repo_state.set_range_selection(Some(RangeSelection {
             options,
+            source,
             ..RangeSelection::new(from.clone(), to.clone(), from_label, to_label)
         }));
         repo_state.set_range_files(Loadable::Loading);
@@ -758,7 +860,7 @@ pub(super) fn compare_range_with_options(
         from,
         to,
         options,
-        request,
+        load,
     });
     effects
 }
@@ -878,10 +980,7 @@ pub(super) fn range_files_loaded(
             }
             Loadable::Ready(Arc::new(comparison.files))
         }
-        Err(e) => {
-            push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-            Loadable::Error(e.to_string())
-        }
+        Err(e) => error_loadable(inputs, repo_state, &e),
     };
     repo_state.set_range_files(next);
     let mut effects = super::util::replan_one_sided_change(inputs, repo_state);
@@ -897,12 +996,13 @@ pub(super) fn range_files_loaded(
         .as_ref()
         .map(|range| range.options)
         .unwrap_or_default();
+    let load = repo_state.begin_range_files_load();
     effects.push(Effect::LoadRangeFiles {
         repo_id,
         from,
         to,
         options,
-        request: repo_state.begin_range_files_load(),
+        load,
     });
     effects
 }
@@ -1061,7 +1161,10 @@ pub(super) fn append_ensure_sidebar_data_effects(
     if request.stashes && matches!(repo_state.stashes, Loadable::NotLoaded) {
         repo_state.set_stashes(Loadable::Loading);
         if repo_state.loads_in_flight.request(LoadKind::Stashes) {
-            effects.push_effect(Effect::LoadStashes { repo_id, limit: 50 });
+            effects.push_effect(Effect::LoadStashes {
+                repo_id,
+                limit: STASH_LIST_LIMIT,
+            });
         }
     }
 }
@@ -1081,19 +1184,44 @@ pub(super) fn ensure_sidebar_data(
     effects
 }
 
-pub(super) fn load_stashes(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> {
+/// Stash entries the stash list loads.
+const STASH_LIST_LIMIT: usize = 50;
+/// Reflog entries the reflog view loads.
+const REFLOG_LIMIT: usize = 200;
+
+/// Marks a lane loading and requests its load, once the repository is open.
+fn request_open_repo_lane<T>(
+    state: &mut AppState,
+    repo_id: RepoId,
+    kind: LoadKind,
+    set_lane: fn(&mut RepoState, Loadable<T>),
+    effect: Effect,
+) -> Vec<Effect> {
     let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
         return Vec::new();
     };
     if !matches!(repo_state.open, Loadable::Ready(())) {
         return Vec::new();
     }
-    repo_state.set_stashes(Loadable::Loading);
-    if repo_state.loads_in_flight.request(LoadKind::Stashes) {
-        vec![Effect::LoadStashes { repo_id, limit: 50 }]
+    set_lane(repo_state, Loadable::Loading);
+    if repo_state.loads_in_flight.request(kind) {
+        vec![effect]
     } else {
         Vec::new()
     }
+}
+
+pub(super) fn load_stashes(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> {
+    request_open_repo_lane(
+        state,
+        repo_id,
+        LoadKind::Stashes,
+        RepoState::set_stashes,
+        Effect::LoadStashes {
+            repo_id,
+            limit: STASH_LIST_LIMIT,
+        },
+    )
 }
 
 pub(super) fn refresh_branches(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> {
@@ -1111,35 +1239,23 @@ pub(super) fn refresh_branches(state: &mut AppState, repo_id: RepoId) -> Vec<Eff
 }
 
 pub(super) fn load_tags(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> {
-    let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
-        return Vec::new();
-    };
-    if !matches!(repo_state.open, Loadable::Ready(())) {
-        return Vec::new();
-    }
-    repo_state.set_tags(Loadable::Loading);
-    if repo_state.loads_in_flight.request(LoadKind::Tags) {
-        vec![Effect::References(ReferenceEffect::LoadTags { repo_id })]
-    } else {
-        Vec::new()
-    }
+    request_open_repo_lane(
+        state,
+        repo_id,
+        LoadKind::Tags,
+        RepoState::set_tags,
+        Effect::References(ReferenceEffect::LoadTags { repo_id }),
+    )
 }
 
 pub(super) fn load_remote_tags(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> {
-    let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
-        return Vec::new();
-    };
-    if !matches!(repo_state.open, Loadable::Ready(())) {
-        return Vec::new();
-    }
-    repo_state.set_remote_tags(Loadable::Loading);
-    if repo_state.loads_in_flight.request(LoadKind::RemoteTags) {
-        vec![Effect::References(ReferenceEffect::LoadRemoteTags {
-            repo_id,
-        })]
-    } else {
-        Vec::new()
-    }
+    request_open_repo_lane(
+        state,
+        repo_id,
+        LoadKind::RemoteTags,
+        RepoState::set_remote_tags,
+        Effect::References(ReferenceEffect::LoadRemoteTags { repo_id }),
+    )
 }
 
 pub(super) fn load_reflog(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> {
@@ -1150,7 +1266,7 @@ pub(super) fn load_reflog(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> 
     if repo_state.loads_in_flight.request(LoadKind::Reflog) {
         vec![Effect::LoadReflog {
             repo_id,
-            limit: 200,
+            limit: REFLOG_LIMIT,
         }]
     } else {
         Vec::new()
@@ -1239,10 +1355,7 @@ pub(super) fn recent_commit_messages_loaded(
     {
         let value = match result {
             Ok(v) => Loadable::Ready(v),
-            Err(e) => {
-                push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                Loadable::Error(e.to_string())
-            }
+            Err(e) => error_loadable(inputs, repo_state, &e),
         };
         repo_state.set_recent_commit_messages(value);
     }
@@ -1327,22 +1440,9 @@ pub(super) fn load_worktree_dirty(state: &mut AppState, repo_id: RepoId) -> Vec<
 /// already running. Returns `None` when a scan is in flight, so callers can
 /// fire this from several triggers without stacking up repeated full scans.
 ///
-/// The watcher-driven trigger fires on every git-state flush, and a full scan
-/// runs `status` on every other worktree, so what bounds the cost is worth
-/// spelling out. First, what does *not* reach here: `.git/index` is classified
-/// as `RepoExternalChange::Index`, not `git_state` (`repo_monitor.rs`,
-/// `is_git_index_path`), so the common edit-stage-unstage loop -- which writes
-/// nothing else -- costs no scan at all. A linked worktree's own index sits at
-/// `.git/worktrees/<name>/index` and is deliberately outside that test, so
-/// changes there do still arrive as git-state and do still earn a scan.
-/// Then, for what does reach here: the monitor debounces raw events at 250ms
-/// with a 2s ceiling
-/// (`repo_monitor.rs`), and `request` admits at most one scan in flight plus one
-/// queued. A storm therefore costs one scan at a time, never a growing queue,
-/// and always ends with one trailing scan — dropping the queued repeat instead
-/// would be cheaper but could leave the counts stale after the last event.
-/// There is deliberately no time-based throttle here: this reducer has no clock,
-/// and the ones that do (window focus, `view/mod.rs`) ride their own.
+/// At most one scan runs with one queued, so an event storm ends in one
+/// trailing scan. This checkout's own index never triggers it
+/// (repo_monitor/policy.rs), and this reducer has no clock to throttle by.
 pub(super) fn request_worktree_dirty_effect(repo_state: &mut RepoState) -> Option<Effect> {
     if !matches!(repo_state.open, Loadable::Ready(())) {
         return None;
@@ -1390,35 +1490,23 @@ pub(super) fn worktree_dirty_effect(repo_state: &RepoState, scope: WorktreeDirty
 }
 
 pub(super) fn load_ref_metadata(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> {
-    let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
-        return Vec::new();
-    };
-    if !matches!(repo_state.open, Loadable::Ready(())) {
-        return Vec::new();
-    }
-    repo_state.set_ref_metadata(Loadable::Loading);
-    if repo_state.loads_in_flight.request(LoadKind::RefMetadata) {
-        vec![Effect::References(ReferenceEffect::LoadRefMetadata {
-            repo_id,
-        })]
-    } else {
-        Vec::new()
-    }
+    request_open_repo_lane(
+        state,
+        repo_id,
+        LoadKind::RefMetadata,
+        RepoState::set_ref_metadata,
+        Effect::References(ReferenceEffect::LoadRefMetadata { repo_id }),
+    )
 }
 
 pub(super) fn load_submodules(state: &mut AppState, repo_id: RepoId) -> Vec<Effect> {
-    let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
-        return Vec::new();
-    };
-    if !matches!(repo_state.open, Loadable::Ready(())) {
-        return Vec::new();
-    }
-    repo_state.set_submodules(Loadable::Loading);
-    if repo_state.loads_in_flight.request(LoadKind::Submodules) {
-        vec![Effect::LoadSubmodules { repo_id }]
-    } else {
-        Vec::new()
-    }
+    request_open_repo_lane(
+        state,
+        repo_id,
+        LoadKind::Submodules,
+        RepoState::set_submodules,
+        Effect::LoadSubmodules { repo_id },
+    )
 }
 
 pub(super) fn load_file_browser(
@@ -1941,10 +2029,7 @@ pub(super) fn file_browser_loaded(
                     reopen = pending.map(|pending| (Arc::clone(&entries), pending));
                     Loadable::Ready(entries)
                 }
-                Err(e) => {
-                    push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                    Loadable::Error(e.to_string())
-                }
+                Err(e) => error_loadable(inputs, repo_state, &e),
             };
             repo_state.file_browser.stale = false;
             repo_state.file_browser.bump_rev();
@@ -1980,10 +2065,7 @@ pub(super) fn branches_loaded(
         if !super::auto_fetch::has_quiet_failure(inputs, repo_state, background, &result) {
             let branches = match result {
                 Ok(v) => Loadable::Ready(v),
-                Err(e) => {
-                    push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                    Loadable::Error(e.to_string())
-                }
+                Err(e) => error_loadable(inputs, repo_state, &e),
             };
             repo_state.set_branches(branches);
         }
@@ -2016,10 +2098,7 @@ pub(super) fn remotes_loaded(
             }
             let remotes = match result {
                 Ok(v) => Loadable::Ready(v),
-                Err(e) => {
-                    push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                    Loadable::Error(e.to_string())
-                }
+                Err(e) => error_loadable(inputs, repo_state, &e),
             };
             repo_state.set_remotes(remotes);
         }
@@ -2090,10 +2169,7 @@ pub(super) fn remote_branches_loaded(
         if !super::auto_fetch::has_quiet_failure(inputs, repo_state, background, &result) {
             let branches = match result {
                 Ok(v) => Loadable::Ready(v),
-                Err(e) => {
-                    push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                    Loadable::Error(e.to_string())
-                }
+                Err(e) => error_loadable(inputs, repo_state, &e),
             };
             repo_state.set_remote_branches(branches);
         }
@@ -2122,8 +2198,8 @@ pub(super) fn status_loaded(
                 clear_resolved_conflict_context(repo_state);
             }
             Err(e) => {
-                push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                repo_state.set_status(Loadable::Error(e.to_string()));
+                let failed = error_loadable(inputs, repo_state, &e);
+                repo_state.set_status(failed);
             }
         }
         StatusLane::Worktree.finish(repo_state, &mut effects);
@@ -2150,8 +2226,8 @@ pub(super) fn worktree_status_loaded(
                 clear_resolved_conflict_context(repo_state);
             }
             Err(e) => {
-                push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                repo_state.set_worktree_status(Loadable::Error(e.to_string()));
+                let failed = error_loadable(inputs, repo_state, &e);
+                repo_state.set_worktree_status(failed);
             }
         }
         StatusLane::Worktree.finish(repo_state, &mut effects);
@@ -2368,8 +2444,8 @@ pub(super) fn staged_status_loaded(
                 }
             }
             Err(e) => {
-                push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                repo_state.set_staged_status(Loadable::Error(e.to_string()));
+                let failed = error_loadable(inputs, repo_state, &e);
+                repo_state.set_staged_status(failed);
             }
         }
         StatusLane::Staged.finish(repo_state, &mut effects);
@@ -2460,10 +2536,7 @@ pub(super) fn head_branch_loaded(
                 }
                 Loadable::Ready(v)
             }
-            Err(e) => {
-                push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                Loadable::Error(e.to_string())
-            }
+            Err(e) => error_loadable(inputs, repo_state, &e),
         };
         // Another branch can track other LFS patterns or be an annex adjusted
         // branch, whether a GitComet checkout or a terminal moved HEAD.
@@ -2566,10 +2639,7 @@ fn apply_upstream_divergence_result(
     }
     let value = match result {
         Ok(value) => Loadable::Ready(value),
-        Err(error) => {
-            push_diagnostic(inputs, repo, DiagnosticKind::Error, error.to_string());
-            Loadable::Error(error.to_string())
-        }
+        Err(error) => error_loadable(inputs, repo, &error),
     };
     repo.set_upstream_divergence(value);
 }
@@ -2601,8 +2671,7 @@ pub(super) fn tags_loaded(
                     if matches!(e.kind(), gitcomet_core::error::ErrorKind::Cancelled) {
                         Loadable::NotLoaded
                     } else {
-                        push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                        Loadable::Error(e.to_string())
+                        error_loadable(inputs, repo_state, &e)
                     }
                 }
             };
@@ -2631,8 +2700,7 @@ pub(super) fn remote_tags_loaded(
                 } else if matches!(e.kind(), gitcomet_core::error::ErrorKind::Cancelled) {
                     Loadable::NotLoaded
                 } else {
-                    push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                    Loadable::Error(e.to_string())
+                    error_loadable(inputs, repo_state, &e)
                 }
             }
         };
@@ -2656,14 +2724,14 @@ pub(super) fn stashes_loaded(
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
         let stashes = match result {
             Ok(v) => Loadable::Ready(v),
-            Err(e) => {
-                push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                Loadable::Error(e.to_string())
-            }
+            Err(e) => error_loadable(inputs, repo_state, &e),
         };
         repo_state.set_stashes(stashes);
         if repo_state.loads_in_flight.finish(LoadKind::Stashes) {
-            effects.push(Effect::LoadStashes { repo_id, limit: 50 });
+            effects.push(Effect::LoadStashes {
+                repo_id,
+                limit: STASH_LIST_LIMIT,
+            });
         }
     }
     effects
@@ -2679,16 +2747,13 @@ pub(super) fn reflog_loaded(
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
         let next = match result {
             Ok(v) => Loadable::Ready(v),
-            Err(e) => {
-                push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                Loadable::Error(e.to_string())
-            }
+            Err(e) => error_loadable(inputs, repo_state, &e),
         };
         repo_state.set_reflog(next);
         if repo_state.loads_in_flight.finish(LoadKind::Reflog) {
             effects.push(Effect::LoadReflog {
                 repo_id,
-                limit: 200,
+                limit: REFLOG_LIMIT,
             });
         }
     }
@@ -2751,10 +2816,7 @@ pub(super) fn squash_message_preview_loaded(
                         body,
                     })
                 }
-                Err(e) => {
-                    push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                    Loadable::Error(e.to_string())
-                }
+                Err(e) => error_loadable(inputs, repo_state, &e),
             };
             repo_state.set_squash_preview(value);
         }
@@ -2998,10 +3060,7 @@ pub(super) fn commit_details_loaded(
             .map(|target| selected_diff_load_plan(inputs, repo_state, target));
         let value = match result {
             Ok(v) => Loadable::Ready(Arc::new(v)),
-            Err(e) => {
-                push_diagnostic(inputs, repo_state, DiagnosticKind::Error, e.to_string());
-                Loadable::Error(e.to_string())
-            }
+            Err(e) => error_loadable(inputs, repo_state, &e),
         };
         repo_state.set_commit_details(value);
         let session_effects = super::diff_session::record_one_sided_sides(repo_state);
@@ -3064,6 +3123,5 @@ pub(super) fn commit_signatures_verified(
         .collect()
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests;

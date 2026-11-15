@@ -2,31 +2,66 @@
 
 use super::*;
 use crate::view::pending_commit::PendingCommit;
-
-pub(super) fn merge_active(repo: Option<&RepoState>) -> bool {
-    repo.is_some_and(|r| matches!(&r.merge_commit_message, Loadable::Ready(Some(_))))
-}
+use gitcomet_core::services::GitHooks;
 
 pub(super) fn commit_allowed(is_merge_active: bool, staged_count: usize) -> bool {
     staged_count > 0 || is_merge_active
 }
 
-impl DetailsPaneView {
-    fn repo_has_head_commit(repo: &RepoState) -> bool {
-        if repo.detached_head_commit.is_some() {
-            return true;
-        }
+/// The commit options a submit carries.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct CommitOptions {
+    pub(super) amend: bool,
+    pub(super) push_after: bool,
+    pub(super) skip_hooks: bool,
+}
 
-        match &repo.head_branch {
-            Loadable::Ready(head) if head == "HEAD" => true,
-            Loadable::Ready(head) => match &repo.branches {
-                Loadable::Ready(branches) => branches.iter().any(|branch| branch.name == *head),
-                _ => true,
+impl CommitOptions {
+    pub(super) fn msg(self, repo_id: RepoId, message: String) -> Msg {
+        let hooks = GitHooks::from_skip(self.skip_hooks);
+        Msg::Commit {
+            repo_id,
+            request: gitcomet_state::model::CommitRequest {
+                message,
+                amend: self.amend,
+                push_after_commit: self.push_after,
+                hooks,
             },
-            _ => true,
         }
     }
 
+    /// The commit button's label and tooltip. Skipped hooks show on the button
+    /// itself, since the choice outlasts the commit it was made for.
+    pub(super) fn button_text(self) -> (&'static str, &'static str) {
+        match (self.amend, self.push_after, self.skip_hooks) {
+            (false, false, false) => ("Commit", "Commit staged changes"),
+            (false, true, false) => ("Commit & Push", "Commit staged changes and push"),
+            (true, false, false) => ("Amend", "Amend the previous commit"),
+            (true, true, false) => (
+                "Amend & Push",
+                "Amend the previous commit; published amends require explicit force push with lease",
+            ),
+            (false, false, true) => (
+                "Commit without Hooks",
+                "Commit staged changes without running the pre-commit and commit-msg hooks",
+            ),
+            (false, true, true) => (
+                "Commit & Push without Hooks",
+                "Commit staged changes and push without running the pre-commit, commit-msg and pre-push hooks",
+            ),
+            (true, false, true) => (
+                "Amend without Hooks",
+                "Amend the previous commit without running the pre-commit and commit-msg hooks",
+            ),
+            (true, true, true) => (
+                "Amend & Push without Hooks",
+                "Amend the previous commit without running the pre-commit, commit-msg and pre-push hooks; published amends require explicit force push with lease",
+            ),
+        }
+    }
+}
+
+impl DetailsPaneView {
     pub(super) fn can_submit_commit(&self, message: &str) -> bool {
         let Some(repo) = self.active_repo() else {
             return false;
@@ -41,25 +76,23 @@ impl DetailsPaneView {
             return false;
         }
         if self.commit_amend_enabled {
-            return !merge_active(Some(repo))
-                && !matches!(repo.rebase_in_progress, Loadable::Ready(true))
-                && Self::repo_has_head_commit(repo);
+            return amend_allowed(repo);
         }
         let staged_count = repo
             .staged_status_entries()
             .map_or(0, |entries| entries.len());
-        let is_merge_active = merge_active(Some(repo));
+        let is_merge_active = merge_in_progress(repo);
         commit_allowed(is_merge_active, staged_count)
     }
 
-    fn submit_commit(&mut self, cx: &mut gpui::Context<Self>) -> bool {
+    fn submit_commit(&mut self, push_after_commit: bool, cx: &mut gpui::Context<Self>) -> bool {
         let Some(repo_id) = self.active_repo_id() else {
             return false;
         };
         let message = self
             .commit_message_input
             .read_with(cx, |input, _| input.text().to_string());
-        let amend = self.commit_amend_enabled;
+        let options = self.commit_options();
         if !self.can_submit_commit(&message) {
             return false;
         }
@@ -69,33 +102,36 @@ impl DetailsPaneView {
             PendingCommit::new(
                 &self.state,
                 repo_id,
-                amend,
+                options.amend,
                 message.trim().to_string().into(),
             ),
         );
-        if amend {
-            self.store.dispatch(Msg::CommitAmend {
-                repo_id,
-                message: message.trim().to_string(),
-                push_after_commit: self.commit_push_after_enabled,
-            });
-        } else {
-            self.store.dispatch(Msg::Commit {
-                repo_id,
-                message: message.trim().to_string(),
-                push_after_commit: self.commit_push_after_enabled,
-            });
-        }
+        self.store.dispatch(
+            CommitOptions {
+                push_after: push_after_commit,
+                ..options
+            }
+            .msg(repo_id, message.trim().to_string()),
+        );
         cx.notify();
         true
     }
 
+    pub(super) fn commit_options(&self) -> CommitOptions {
+        CommitOptions {
+            amend: self.commit_amend_enabled,
+            push_after: self.commit_push_after_enabled,
+            skip_hooks: self.commit_skip_hooks_enabled,
+        }
+    }
+
     pub(in crate::view) fn handle_commit_submit_shortcut(
         &mut self,
+        push_after_commit: bool,
         window: &Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
-        if self.handle_commit_reword_submit_shortcut(window, cx) {
+        if !push_after_commit && self.handle_commit_reword_submit_shortcut(window, cx) {
             return true;
         }
         if !self
@@ -107,7 +143,7 @@ impl DetailsPaneView {
             return false;
         }
 
-        let _ = self.submit_commit(cx);
+        let _ = self.submit_commit(push_after_commit, cx);
         true
     }
 
@@ -126,36 +162,24 @@ impl DetailsPaneView {
         let spinner = |id: (&'static str, u64)| {
             components::ButtonSlot::spinner(id, icon_color, scaled_px(14.0))
         };
-        let commit_label = match (self.commit_amend_enabled, self.commit_push_after_enabled) {
-            (false, false) => "Commit",
-            (false, true) => "Commit changes and Push",
-            (true, false) => "Amend Previous Commit",
-            (true, true) => "Amend and Push Safely",
-        };
-        let commit_tooltip = match (self.commit_amend_enabled, self.commit_push_after_enabled) {
-            (false, false) => "Commit staged changes",
-            (false, true) => "Commit staged changes and push",
-            (true, false) => "Amend the previous commit",
-            (true, true) => {
-                "Amend the previous commit; published amends require explicit force push with lease"
-            }
-        };
-        let commit_options_invoker: SharedString = "commit_options".into();
-        let commit_options_active = self
-            .active_context_menu_invoker
-            .as_ref()
-            .is_some_and(|id| id.as_ref() == commit_options_invoker.as_ref());
+        let options = self.commit_options();
+        let amend = options.amend;
+        let (commit_label, commit_tooltip) = CommitOptions {
+            push_after: false,
+            ..options
+        }
+        .button_text();
+        let (push_label, push_tooltip) = CommitOptions {
+            push_after: true,
+            ..options
+        }
+        .button_text();
         let previous_messages_invoker: SharedString = "previous_commit_messages".into();
         let previous_messages_active = self
             .active_context_menu_invoker
             .as_ref()
             .is_some_and(|id| id.as_ref() == previous_messages_invoker.as_ref());
         let menu_selected_bg = components::control_open_background(theme);
-        let menu_icon_color = if commit_options_active {
-            theme.colors.accent.foreground
-        } else {
-            theme.colors.foreground.secondary
-        };
         let previous_messages_icon_color = if previous_messages_active {
             theme.colors.accent.foreground
         } else {
@@ -166,57 +190,131 @@ impl DetailsPaneView {
             .w_full()
             .min_w(px(0.0))
             .child(self.commit_message_input.clone());
-        let commit_main = components::Button::new("commit", commit_label)
-            .start_slot(if commit_in_flight {
-                spinner(("commit_spinner", repo_key))
-            } else {
-                icon("icons/check.svg")
-                    .debug_selector(|| "commit_button_icon".to_string())
-                    .into()
+        let start_slot =
+            |id: &'static str, icon_selector: &'static str| -> components::ButtonSlot {
+                if commit_in_flight {
+                    spinner((id, repo_key))
+                } else {
+                    icon("icons/check.svg")
+                        .debug_selector(move || icon_selector.to_string())
+                        .into()
+                }
+            };
+        let commit = components::Button::new("commit", commit_label)
+            .start_slot(start_slot("commit_spinner", "commit_button_icon"))
+            .style(components::ButtonStyle::Subtle)
+            .disabled(!can_submit_commit)
+            .on_click(theme, cx, |this, _e, _w, cx| {
+                let _ = this.submit_commit(false, cx);
             })
+            .debug_selector(|| "commit_button".to_string())
+            .gitcomet_tooltip_keyed(
+                theme,
+                commit_tooltip.into(),
+                vec![components::secondary_shortcut("Enter").into()],
+            );
+        let commit_and_push = components::Button::new("commit_and_push", push_label)
+            .start_slot(start_slot(
+                "commit_push_spinner",
+                "commit_and_push_button_icon",
+            ))
             .style(components::ButtonStyle::Subtle)
-            .disabled(!can_submit_commit);
-        let commit_menu = components::Button::new("commit_options", "")
-            .start_slot(
-                svg_icon("icons/chevron_down.svg", menu_icon_color, scaled_px(14.0))
-                    .debug_selector(|| "commit_options_icon".to_string()),
+            .disabled(!can_submit_commit)
+            .on_click(theme, cx, |this, _e, _w, cx| {
+                let _ = this.submit_commit(true, cx);
+            })
+            .debug_selector(|| "commit_and_push_button".to_string())
+            .gitcomet_tooltip_keyed(
+                theme,
+                push_tooltip.into(),
+                vec![components::secondary_shortcut("Shift+Enter").into()],
+            );
+        // The frame and raised fill the old split Commit button used.
+        let framed = |frame_selector: &'static str, button: gpui::Stateful<gpui::Div>| {
+            components::filled_action_frame(
+                theme,
+                crate::ui_scale::UiScale::from_percent(ui_scale_percent)
+                    .with_appearance(theme.metrics),
             )
-            .style(components::ButtonStyle::Subtle)
-            .open(commit_options_active)
-            .selected_bg(menu_selected_bg)
-            .disabled(self.active_repo_id().is_none());
-        let commit = components::SplitButton::from_buttons(
-            commit_main,
-            commit_menu,
-            cx,
-            |button, cx| {
-                button
-                    .on_click(theme, cx, |this, _e, _w, cx| {
-                        let _ = this.submit_commit(cx);
-                    })
-                    .debug_selector(|| "commit_button".to_string())
-                    .gitcomet_tooltip(theme, commit_tooltip.into())
-            },
-            |button, cx| {
-                button
-                    .on_click_with_bounds(theme, cx, move |this, _e, bounds, window, cx| {
-                        let Some(repo_id) = this.active_repo_id() else {
-                            return;
-                        };
-                        this.open_popover_for_bounds(
-                            (PopoverKind::CommitOptionsMenu { repo_id })
-                                .invoked_by(commit_options_invoker.clone()),
-                            bounds,
-                            window,
-                            cx,
-                        );
-                    })
-                    .gitcomet_tooltip(theme, "Commit options".into())
-            },
-        )
-        .style(components::SplitButtonStyle::Filled)
-        .render(theme, ui_scale_percent)
-        .debug_selector(|| "commit_split_button".to_string());
+            .flex_1()
+            .debug_selector(move || frame_selector.to_string())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h_full()
+                    .w_full()
+                    .rounded(px(theme.radii.control))
+                    .bg(theme.colors.surface.raised)
+                    .overflow_hidden()
+                    // The whole frame is the click target, not just the label.
+                    .child(button.flex_1()),
+            )
+        };
+        let checkbox = |id: &'static str, label: &'static str, on: bool| {
+            div()
+                .id(id)
+                .debug_selector(move || id.to_string())
+                .flex()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .child(
+                    div()
+                        .size(scaled_px(14.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(theme.radii.control.min(4.0)))
+                        .border_1()
+                        .border_color(if on {
+                            theme.colors.accent.foreground
+                        } else {
+                            theme.colors.stroke.default
+                        })
+                        .when(on, |d| d.bg(theme.colors.accent.foreground))
+                        .when(on, |d| {
+                            d.child(svg_icon(
+                                "icons/check.svg",
+                                theme.colors.surface.canvas,
+                                scaled_px(10.0),
+                            ))
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(theme.ui_text(13.0))
+                        .text_color(theme.colors.foreground.primary)
+                        .child(label),
+                )
+        };
+        let amend_toggle = checkbox("commit_amend_toggle", "Amend previous commit", amend)
+            .on_activate(
+                false,
+                components::ControlActivation::Action,
+                cx.listener(|this, e: &ClickEvent, _w, cx| {
+                    if e.standard_click() {
+                        this.toggle_commit_amend(cx);
+                    }
+                }),
+            );
+        let skip_hooks_toggle =
+            checkbox("commit_skip_hooks_toggle", "Skip hooks", options.skip_hooks)
+                .on_activate(
+                    false,
+                    components::ControlActivation::Action,
+                    cx.listener(|this, e: &ClickEvent, _w, cx| {
+                        if e.standard_click() {
+                            this.toggle_commit_skip_hooks(cx);
+                        }
+                    }),
+                )
+                .gitcomet_tooltip(
+                    theme,
+                    "Skip the pre-commit, commit-msg and pre-push hooks until this window closes"
+                        .into(),
+                );
         let previous_messages_menu = components::Button::new("previous_commit_messages", "")
             .start_slot(
                 svg_icon(
@@ -245,15 +343,63 @@ impl DetailsPaneView {
             })
             .debug_selector(|| "previous_commit_messages_button".to_string())
             .gitcomet_tooltip(theme, "Previous commit messages".into());
-        div().flex().flex_col().gap_2().child(commit_message).child(
-            div().flex().items_center().justify_end().child(
+        let message_card = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .border_1()
+            .border_color(theme.colors.stroke.default)
+            .rounded(px(theme.radii.panel))
+            .overflow_hidden()
+            .child(
+                div()
+                    .px_3()
+                    .py_1p5()
+                    .border_b_1()
+                    .border_color(theme.colors.stroke.subtle)
+                    .text_size(theme.ui_text(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.colors.foreground.primary)
+                    .child("Commit Message"),
+            )
+            .child(div().px_3().py_2().child(commit_message));
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(message_card)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_x_3()
+                            .gap_y_1()
+                            .child(amend_toggle)
+                            .child(skip_hooks_toggle),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .children(self.extension_commit_items.iter().cloned())
+                            .child(previous_messages_menu),
+                    ),
+            )
+            .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(previous_messages_menu)
-                    .child(commit),
-            ),
-        )
+                    .child(framed("commit_button_frame", commit))
+                    .child(framed("commit_and_push_button_frame", commit_and_push)),
+            )
     }
 }

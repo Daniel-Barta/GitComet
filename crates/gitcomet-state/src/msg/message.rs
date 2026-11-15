@@ -1,8 +1,9 @@
 use crate::model::GitLogTagFetchMode;
 use crate::model::{
-    BranchExistsPromptState, ConflictFileLoadMode, DefaultTagType, FileBrowserSettings,
-    ForceDeleteBranchPrompt, ForceRemoveWorktreePrompt, GitOperationOuterOutcome,
-    MaintenanceSettings, RemoteSettings, RepoId, SidebarDataRequest, SidebarMode,
+    BranchExistsPromptState, CommitRequest, ConflictFileLoadMode, DefaultTagType,
+    FileBrowserSettings, ForceDeleteBranchPrompt, ForceRemoveWorktreePrompt,
+    GitOperationOuterOutcome, MaintenanceSettings, RemoteSettings, RepoId, SidebarDataRequest,
+    SidebarMode,
 };
 use gitcomet_core::auth::StagedGitAuth;
 use gitcomet_core::conflict_session::ConflictSession;
@@ -15,9 +16,9 @@ use gitcomet_core::services::GitRepository;
 use gitcomet_core::services::MergeFastForward;
 use gitcomet_core::services::{
     CheckoutRemoteBranchMode, CommandOutput, CommitOperationOutcome, ConflictSide, ForcePushLease,
-    InteractiveRebaseEntry, PullMode, RemoteUrlKind, ResetMode, SafePushAfterCommitContext,
-    SafePushAfterCommitDecision, SafePushAfterCommitTarget, SequencerState, SubmoduleTrustDecision,
-    SubmoduleTrustTarget, WorktreeCheckout,
+    GitHooks, InteractiveRebaseEntry, PullMode, RemoteUrlKind, ResetMode,
+    SafePushAfterCommitContext, SafePushAfterCommitDecision, SafePushAfterCommitTarget,
+    SequencerState, SubmoduleTrustDecision, SubmoduleTrustTarget, WorktreeCheckout,
 };
 use gitcomet_core::signing_tools::SigningToolsState;
 use std::path::PathBuf;
@@ -200,8 +201,9 @@ pub enum CommitSelectMode {
     Toggle,
     /// Shift click: select the range between the anchor and the clicked commit.
     Range,
-    /// Ctrl/Cmd+Shift click: select the anchor and the clicked commit as a pair
-    /// whose comparison is the direct diff between them, not a merged diff.
+    /// Ctrl/Cmd+Shift click: compare the clicked commit with the working tree
+    /// while History's "Uncommitted changes" row is selected or paired;
+    /// otherwise a plain click.
     Compare,
     /// Move focus to the clicked commit while preserving an existing
     /// multi-selection that already contains it (used by right-click so the
@@ -1066,13 +1068,7 @@ pub enum Msg {
     },
     Commit {
         repo_id: RepoId,
-        message: String,
-        push_after_commit: bool,
-    },
-    CommitAmend {
-        repo_id: RepoId,
-        message: String,
-        push_after_commit: bool,
+        request: CommitRequest,
     },
     SafePushAfterCommit {
         repo_id: RepoId,
@@ -1127,6 +1123,7 @@ pub enum Msg {
         repo_id: RepoId,
         target: SafePushAfterCommitTarget,
         set_upstream: bool,
+        hooks: GitHooks,
     },
     ForcePush {
         repo_id: RepoId,
@@ -1367,7 +1364,7 @@ pub enum Msg {
         repo_id: RepoId,
         path: RepoPath,
     },
-    /// section 30 split: rewrite one in-memory conflict block into 2–3 blocks
+    /// Split: rewrite one in-memory conflict block into 2–3 blocks
     /// at block-local line boundaries.
     ConflictSplitRegion {
         repo_id: RepoId,
@@ -1394,7 +1391,7 @@ pub enum Msg {
         path: RepoPath,
         expected_conflict_rev: u64,
     },
-    /// section 30 join: merge conflict blocks `region_index` and `region_index + 1`,
+    /// Join: merge conflict blocks `region_index` and `region_index + 1`,
     /// absorbing the context between them into every side.
     ConflictJoinRegions {
         repo_id: RepoId,
@@ -1859,10 +1856,7 @@ pub enum InternalMsg {
     },
     CommitFinished {
         repo_id: RepoId,
-        result: Result<CommitOperationOutcome, Error>,
-    },
-    CommitAmendFinished {
-        repo_id: RepoId,
+        request: CommitRequest,
         result: Result<CommitOperationOutcome, Error>,
     },
     SafePushAfterCommitFinished {
@@ -1881,48 +1875,6 @@ pub enum InternalMsg {
 impl From<InternalMsg> for Msg {
     fn from(value: InternalMsg) -> Self {
         Self::Internal(value)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{InternalMsg, Msg, RepoActionKind};
-    use crate::model::RepoId;
-    use gitcomet_core::error::{Error, ErrorKind};
-    use std::path::PathBuf;
-
-    #[test]
-    fn wraps_internal_messages() {
-        let msg: Msg = InternalMsg::RepoActionFinished {
-            repo_id: RepoId(7),
-            action: RepoActionKind::CheckoutBranch,
-            result: Ok(()),
-        }
-        .into();
-
-        assert!(matches!(
-            msg,
-            Msg::Internal(InternalMsg::RepoActionFinished {
-                repo_id: RepoId(7),
-                action: RepoActionKind::CheckoutBranch,
-                result: Ok(())
-            })
-        ));
-    }
-
-    #[test]
-    fn clone_repo_finished_debug_keeps_result_compact() {
-        let msg: Msg = InternalMsg::CloneRepoFinished {
-            url: "https://example.invalid/repo.git".to_string(),
-            dest: PathBuf::from("/tmp/repo"),
-            result: Err(Error::new(ErrorKind::Backend("clone failed".to_string()))),
-        }
-        .into();
-        let debug = format!("{msg:?}");
-
-        assert!(debug.contains("CloneRepoFinished"));
-        assert!(debug.contains("ok: false"));
-        assert!(!debug.contains("clone failed"));
     }
 }
 
@@ -1974,3 +1926,6 @@ impl From<std::sync::Arc<[u8]>> for ContentBytes {
         Self(bytes)
     }
 }
+
+#[cfg(test)]
+mod tests;

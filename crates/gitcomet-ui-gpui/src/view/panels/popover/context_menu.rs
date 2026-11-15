@@ -36,6 +36,7 @@ mod mergetool_settings;
 mod previous_commit_messages;
 pub(super) mod pull;
 mod push;
+mod ref_menu;
 mod reflog_entry;
 mod remote;
 mod remote_web_picker;
@@ -54,6 +55,58 @@ mod web_link;
 mod worktree;
 mod worktree_file;
 mod worktree_section;
+
+/// The menu entry that compares a commit against the mark named `label`.
+pub(in crate::view) fn compare_with_mark_label(label: &str) -> SharedString {
+    format!("Compare with {label}").into()
+}
+
+/// Comparing `commit_id` (named `label`) against the comparison mark: compare
+/// and merge-base compare when the mark is another commit, and clearing the
+/// mark wherever one is set, the marked commit's own row included.
+fn marked_comparison_entries(
+    repo_id: RepoId,
+    commit_id: &CommitId,
+    label: &str,
+    mark: Option<(&CommitId, &str)>,
+) -> Vec<ContextMenuItem> {
+    let Some((mark_commit, mark_label)) = mark else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    if mark_commit != commit_id {
+        items.push(ContextMenuItem::Entry {
+            label: compare_with_mark_label(mark_label),
+            icon: Some("icons/open_external.svg".into()),
+            shortcut: None,
+            disabled: false,
+            action: Box::new(ContextMenuAction::CompareWithMarked {
+                repo_id,
+                commit_id: commit_id.clone(),
+                label: label.to_string(),
+            }),
+        });
+        items.push(ContextMenuItem::Entry {
+            label: "Compare with merge base".into(),
+            icon: Some("icons/open_external.svg".into()),
+            shortcut: None,
+            disabled: false,
+            action: Box::new(ContextMenuAction::CompareWithMergeBase {
+                repo_id,
+                commit_id: commit_id.clone(),
+                label: label.to_string(),
+            }),
+        });
+    }
+    items.push(ContextMenuItem::Entry {
+        label: "Clear comparison mark".into(),
+        icon: Some("icons/generic_close.svg".into()),
+        shortcut: None,
+        disabled: false,
+        action: Box::new(ContextMenuAction::ClearComparisonMark { repo_id }),
+    });
+    items
+}
 
 fn resolve_checkout_file_path(
     workdir: &std::path::Path,
@@ -667,11 +720,9 @@ impl PopoverHost {
                     load_remote_image_url,
                 ))
             }
-            PopoverKind::CommitShaLinkMenu {
-                repo_id,
-                commit_id,
-                allow_navigate,
-            } => Some(commit_sha_link::model(*repo_id, commit_id, *allow_navigate)),
+            PopoverKind::CommitShaLinkMenu { repo_id, commit_id } => {
+                Some(commit_sha_link::model(*repo_id, commit_id))
+            }
             PopoverKind::StashMenu {
                 repo_id,
                 index,
@@ -823,6 +874,7 @@ impl PopoverHost {
                 Some(diff_hunk::model(self, *repo_id, *src_ix, cx))
             }
             PopoverKind::DiffEditorMenu {
+                context_actions,
                 repo_id,
                 area,
                 path,
@@ -834,6 +886,7 @@ impl PopoverHost {
                 copy_text,
                 copy_target,
             } => Some(diff_editor::model(
+                context_actions,
                 *repo_id,
                 *area,
                 path,
@@ -1171,6 +1224,13 @@ impl PopoverHost {
         self.close_popover(cx);
     }
 
+    /// A Stage, Unstage or Discard from a menu or dialog, sent through the
+    /// diff so it can open the next file once the open one is left empty.
+    pub(super) fn dispatch_open_file_change(&self, msg: Msg, cx: &mut gpui::Context<Self>) {
+        self.diff_renderer
+            .update(cx, |pane, cx| pane.dispatch_open_file_change(msg, cx));
+    }
+
     pub(super) fn discard_worktree_changes_confirmed(
         &mut self,
         repo_id: RepoId,
@@ -1220,8 +1280,7 @@ impl PopoverHost {
         };
 
         if paths.len() > 1 {
-            self.store
-                .dispatch(Msg::DiscardWorktreeChangesPaths { repo_id, paths });
+            self.dispatch_open_file_change(Msg::DiscardWorktreeChangesPaths { repo_id, paths }, cx);
             return;
         }
 
@@ -1229,8 +1288,7 @@ impl PopoverHost {
             return;
         };
 
-        self.store
-            .dispatch(Msg::DiscardWorktreeChangesPath { repo_id, path });
+        self.dispatch_open_file_change(Msg::DiscardWorktreeChangesPath { repo_id, path }, cx);
     }
 
     pub(super) fn build_unified_patch_for_hunk_src_ix(
@@ -1798,6 +1856,43 @@ mod tests {
     use super::*;
 
     use crate::kit::components::secondary_shortcut;
+
+    fn entry_labels(items: &[ContextMenuItem]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                ContextMenuItem::Entry { label, .. } => Some(label.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_marked_commit_offers_only_to_clear_its_mark() {
+        let marked = CommitId("c00".into());
+        let entries = marked_comparison_entries(RepoId(1), &marked, "c00", Some((&marked, "main")));
+        assert_eq!(entry_labels(&entries), ["Clear comparison mark"]);
+    }
+
+    #[test]
+    fn another_commit_compares_against_the_mark() {
+        let marked = CommitId("c00".into());
+        let entries = marked_comparison_entries(
+            RepoId(1),
+            &CommitId("c01".into()),
+            "c01",
+            Some((&marked, "main")),
+        );
+        assert_eq!(
+            entry_labels(&entries),
+            [
+                "Compare with main",
+                "Compare with merge base",
+                "Clear comparison mark"
+            ]
+        );
+        assert!(marked_comparison_entries(RepoId(1), &marked, "c00", None).is_empty());
+    }
 
     #[test]
     fn context_menu_shortcut_entry_ix_matches_first_enabled_single_character_entry() {

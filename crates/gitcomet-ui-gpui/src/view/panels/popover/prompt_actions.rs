@@ -64,6 +64,7 @@ impl PopoverHost {
             PopoverKind::ErrorDetails { toast_id } => {
                 error_details::panel(self, toast_id, window, cx)
             }
+            PopoverKind::KeyboardShortcuts => keyboard_shortcuts::panel(self, window, cx),
             PopoverKind::RepoPicker { .. } => repo_picker::panel(self, cx),
             PopoverKind::BranchPicker { .. } => branch_picker::panel(self, cx),
             PopoverKind::UpstreamPicker { repo_id, branch } => {
@@ -312,18 +313,9 @@ impl PopoverHost {
                 },
                 cx,
             ),
-            PopoverKind::CommitShaLinkMenu {
-                repo_id,
-                commit_id,
-                allow_navigate,
-            } => self.context_menu_view(
-                PopoverKind::CommitShaLinkMenu {
-                    repo_id,
-                    commit_id,
-                    allow_navigate,
-                },
-                cx,
-            ),
+            PopoverKind::CommitShaLinkMenu { repo_id, commit_id } => {
+                self.context_menu_view(PopoverKind::CommitShaLinkMenu { repo_id, commit_id }, cx)
+            }
             PopoverKind::MergetoolSettingsMenu => {
                 self.context_menu_view(PopoverKind::MergetoolSettingsMenu, cx)
             }
@@ -411,6 +403,7 @@ impl PopoverHost {
                 self.context_menu_view(PopoverKind::DiffHunkMenu { repo_id, src_ix }, cx)
             }
             PopoverKind::DiffEditorMenu {
+                context_actions,
                 repo_id,
                 area,
                 path,
@@ -423,6 +416,7 @@ impl PopoverHost {
                 copy_target,
             } => self.context_menu_view(
                 PopoverKind::DiffEditorMenu {
+                    context_actions,
                     repo_id,
                     area,
                     path,

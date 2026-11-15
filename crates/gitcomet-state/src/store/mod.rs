@@ -22,6 +22,7 @@ mod reducer;
 mod reducer_diagnostics;
 mod repo_load_trace;
 mod repo_monitor;
+mod repository_budget;
 mod repository_preferences;
 mod repository_registry;
 mod repository_requirement;
@@ -42,9 +43,8 @@ use reducer::prepared::PreparedReduction;
 #[cfg(any(test, feature = "benchmarks"))]
 use reducer::reduce;
 use reducer::{
-    fill_reorder_repo_tabs_inline, fill_set_active_repo_inline, fill_stage_path_inline,
-    fill_stage_paths_inline, fill_unstage_path_inline, fill_unstage_paths_inline, reduce_prepared,
-    reset_conflict_resolutions_inline, set_conflict_region_choice_inline,
+    fill_path_action_inline, fill_reorder_repo_tabs_inline, fill_set_active_repo_inline,
+    reduce_prepared, reset_conflict_resolutions_inline, set_conflict_region_choice_inline,
 };
 use repo_monitor::RepoMonitorManager;
 use repository_runtime::RepositoryRuntimes;
@@ -94,12 +94,24 @@ fn isolated_filesystem() -> &'static std::sync::Mutex<gitcomet_core::filesystem:
 /// so elsewhere only the active repository is watched.
 #[cfg(target_os = "macos")]
 const WARM_INACTIVE_REPO_MONITORS: usize = 2;
-#[cfg(not(target_os = "macos"))]
-const WARM_INACTIVE_REPO_MONITORS: usize = 0;
 
-/// The `count` most recently active open tabs that are neither active nor
-/// leased, most recent first.
-fn warm_inactive_repos(state: &AppState, count: usize) -> Vec<RepoId> {
+#[cfg(target_os = "macos")]
+fn warm_inactive_repo_monitors(warm_backends: usize) -> usize {
+    WARM_INACTIVE_REPO_MONITORS.min(warm_backends)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn warm_inactive_repo_monitors(_warm_backends: usize) -> usize {
+    0
+}
+
+/// The `count` most recent open tabs by `recency` that are neither active
+/// nor leased, most recent first.
+fn warm_inactive_repos(
+    state: &AppState,
+    count: usize,
+    recency: fn(&crate::model::RepoState) -> Option<std::time::SystemTime>,
+) -> Vec<RepoId> {
     if count == 0 {
         return Vec::new();
     }
@@ -110,10 +122,11 @@ fn warm_inactive_repos(state: &AppState, count: usize) -> Vec<RepoId> {
             state.active_repo != Some(repo.id)
                 && !state.watch_leases.contains_key(&repo.id)
                 && matches!(repo.open, crate::model::Loadable::Ready(()))
-                && repo.last_active_at.is_some()
+                && !repo.backend_parked
+                && recency(repo).is_some()
         })
         .collect();
-    recent.sort_by_key(|repo| std::cmp::Reverse(repo.last_active_at));
+    recent.sort_by_key(|repo| std::cmp::Reverse(recency(repo)));
     recent.truncate(count);
     recent.into_iter().map(|repo| repo.id).collect()
 }
@@ -434,6 +447,34 @@ impl WorkerLoopContext<'_> {
         drop(selections);
         drop(state);
         self.handle_effects(repos, effects);
+        self.park_cold_repositories(repos);
+    }
+
+    /// Runs once the pass's effects hold their backends: parking then
+    /// cancels that work instead of failing it on a missing handle.
+    fn park_cold_repositories(&mut self, repos: &mut RepositoryRuntimes) {
+        let now = std::time::SystemTime::now();
+        let cold = repository_budget::cold_repositories(
+            &self.thread_state.read().unwrap_or_else(|e| e.into_inner()),
+            repos,
+            now,
+        );
+        if cold.is_empty() {
+            return;
+        }
+        {
+            let mut app_state = self.thread_state.write().unwrap_or_else(|e| e.into_inner());
+            let mutable = make_mut_state_with_diagnostics(&mut app_state);
+            repository_budget::park(mutable, repos, &cold);
+            repository_registry::update_repositories(
+                self.thread_msg_tx.store_id().get(),
+                mutable,
+                repos,
+            );
+            self.publication.fetch_add(1, Ordering::Relaxed);
+        }
+        repos.release_retired();
+        self.handle_effects(repos, std::iter::empty());
     }
 
     fn handle_effects<I>(&mut self, repos: &mut RepositoryRuntimes, effects: I)
@@ -463,7 +504,13 @@ impl WorkerLoopContext<'_> {
         // a refresh when nothing changed (`unchanged_since_inactive`).
         let (active_repo, watched): (Option<RepoId>, Vec<(RepoId, std::path::PathBuf, bool)>) = {
             let state = self.thread_state.read().unwrap_or_else(|e| e.into_inner());
-            let warm = warm_inactive_repos(&state, WARM_INACTIVE_REPO_MONITORS);
+            let warm = warm_inactive_repos(
+                &state,
+                warm_inactive_repo_monitors(
+                    repos.warm_repository_count(std::time::SystemTime::now()),
+                ),
+                |repo| repo.last_active_at,
+            );
             let watched = state
                 .repos
                 .iter()
@@ -544,9 +591,6 @@ impl WorkerLoopContext<'_> {
 
         for mut effect in effects {
             if let crate::msg::Effect::Commit {
-                repo_id, identity, ..
-            }
-            | crate::msg::Effect::CommitAmend {
                 repo_id, identity, ..
             } = &mut effect
             {
@@ -1106,29 +1150,33 @@ impl AppStore {
                     }
                     Msg::StagePath { repo_id, path } => {
                         worker_ctx.reduce_and_handle(&mut repos, &id_alloc, |app_state, _, _| {
-                            let mut effects = reducer::SinglePathActionEffects::new();
-                            fill_stage_path_inline(app_state, repo_id, path, &mut effects);
+                            let mut effects = reducer::PathActionEffects::new();
+                            let effect = crate::msg::Effect::StagePath { repo_id, path };
+                            fill_path_action_inline(app_state, repo_id, effect, &mut effects);
                             effects
                         });
                     }
                     Msg::StagePaths { repo_id, paths } => {
                         worker_ctx.reduce_and_handle(&mut repos, &id_alloc, |app_state, _, _| {
-                            let mut effects = reducer::BatchPathActionEffects::new();
-                            fill_stage_paths_inline(app_state, repo_id, paths, &mut effects);
+                            let mut effects = reducer::PathActionEffects::new();
+                            let effect = crate::msg::Effect::StagePaths { repo_id, paths };
+                            fill_path_action_inline(app_state, repo_id, effect, &mut effects);
                             effects
                         });
                     }
                     Msg::UnstagePath { repo_id, path } => {
                         worker_ctx.reduce_and_handle(&mut repos, &id_alloc, |app_state, _, _| {
-                            let mut effects = reducer::SinglePathActionEffects::new();
-                            fill_unstage_path_inline(app_state, repo_id, path, &mut effects);
+                            let mut effects = reducer::PathActionEffects::new();
+                            let effect = crate::msg::Effect::UnstagePath { repo_id, path };
+                            fill_path_action_inline(app_state, repo_id, effect, &mut effects);
                             effects
                         });
                     }
                     Msg::UnstagePaths { repo_id, paths } => {
                         worker_ctx.reduce_and_handle(&mut repos, &id_alloc, |app_state, _, _| {
-                            let mut effects = reducer::BatchPathActionEffects::new();
-                            fill_unstage_paths_inline(app_state, repo_id, paths, &mut effects);
+                            let mut effects = reducer::PathActionEffects::new();
+                            let effect = crate::msg::Effect::UnstagePaths { repo_id, paths };
+                            fill_path_action_inline(app_state, repo_id, effect, &mut effects);
                             effects
                         });
                     }
@@ -1353,8 +1401,25 @@ impl AppStore {
     /// Reads a backend handle for this repository lifetime on a worker thread.
     /// This waits for the store worker; do not call from the UI thread or a reducer.
     /// An old handle never resolves to a reopened repository with the same id.
+    /// A parked tab is read through a handle opened for the caller, which
+    /// leaves the tab parked.
     pub fn repository(&self, repo_id: RepoId, lifetime: u64) -> Option<Arc<dyn GitRepository>> {
-        self.msg_tx.repository(repo_id, lifetime)
+        self.msg_tx.repository(repo_id, lifetime).or_else(|| {
+            let workdir = self
+                .snapshot()
+                .repos
+                .iter()
+                .find(|repo| {
+                    repo.id == repo_id
+                        && repo.lifetime() == lifetime
+                        && repo.is_backend_parked()
+                        && matches!(repo.open, crate::model::Loadable::Ready(()))
+                })?
+                .spec
+                .workdir
+                .clone();
+            self.backend.open(&workdir).ok()
+        })
     }
 
     /// [`Self::snapshot`] without blocking: `None` while the reducer holds
@@ -1476,53 +1541,14 @@ pub(crate) fn with_select_diff_inline_for_bench<T>(
 
 #[cfg(feature = "benchmarks")]
 #[inline]
-pub(crate) fn with_stage_path_inline_for_bench<T>(
+pub(crate) fn with_path_action_inline_for_bench<T>(
     state: &mut AppState,
     repo_id: RepoId,
-    path: PathBuf,
+    effect: crate::msg::Effect,
     f: impl FnOnce(&AppState, &[crate::msg::Effect]) -> T,
 ) -> T {
-    let mut effects = reducer::SinglePathActionEffects::new();
-    fill_stage_path_inline(state, repo_id, path, &mut effects);
-    f(state, &effects)
-}
-
-#[cfg(feature = "benchmarks")]
-#[inline]
-pub(crate) fn with_stage_paths_inline_for_bench<T>(
-    state: &mut AppState,
-    repo_id: RepoId,
-    paths: crate::msg::RepoPathList,
-    f: impl FnOnce(&AppState, &[crate::msg::Effect]) -> T,
-) -> T {
-    let mut effects = reducer::BatchPathActionEffects::new();
-    fill_stage_paths_inline(state, repo_id, paths, &mut effects);
-    f(state, &effects)
-}
-
-#[cfg(feature = "benchmarks")]
-#[inline]
-pub(crate) fn with_unstage_path_inline_for_bench<T>(
-    state: &mut AppState,
-    repo_id: RepoId,
-    path: PathBuf,
-    f: impl FnOnce(&AppState, &[crate::msg::Effect]) -> T,
-) -> T {
-    let mut effects = reducer::SinglePathActionEffects::new();
-    fill_unstage_path_inline(state, repo_id, path, &mut effects);
-    f(state, &effects)
-}
-
-#[cfg(feature = "benchmarks")]
-#[inline]
-pub(crate) fn with_unstage_paths_inline_for_bench<T>(
-    state: &mut AppState,
-    repo_id: RepoId,
-    paths: crate::msg::RepoPathList,
-    f: impl FnOnce(&AppState, &[crate::msg::Effect]) -> T,
-) -> T {
-    let mut effects = reducer::BatchPathActionEffects::new();
-    fill_unstage_paths_inline(state, repo_id, paths, &mut effects);
+    let mut effects = reducer::PathActionEffects::new();
+    fill_path_action_inline(state, repo_id, effect, &mut effects);
     f(state, &effects)
 }
 

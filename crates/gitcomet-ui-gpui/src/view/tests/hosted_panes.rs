@@ -9,6 +9,11 @@ use gitcomet_extension_api::{
 use gitcomet_state::model::Loadable;
 use gitcomet_state::msg::WorktreeSaveBaseline;
 
+#[path = "hosted_context.rs"]
+mod context;
+#[path = "hosted_views.rs"]
+mod views;
+
 fn git(dir: &Path, args: &[&str]) {
     crate::test_support::git(dir, args);
 }
@@ -446,7 +451,7 @@ fn edit_hosted(
 fn hosted_parent_saves_keep_their_binding_when_a_nested_repository_is_open(
     cx: &mut gpui::TestAppContext,
 ) {
-    let (dir, store, view, cx) = open_repository(cx);
+    let (dir, store, view, cx) = open_repository_with(cx, Arc::new(gitcomet_git_gix::GixBackend));
     let nested = dir.path().join("nested");
     std::fs::create_dir(&nested).unwrap();
     let nested = canonicalize_or_original(nested);
@@ -881,6 +886,108 @@ fn disposing_a_hosted_editor_keeps_its_pending_write_receipt(cx: &mut gpui::Test
     );
 }
 
+/// A hosted pane's environment in `view`'s window, without staging or saving.
+fn read_only_environment(
+    cx: &mut gpui::VisualTestContext,
+    view: &gpui::Entity<GitCometView>,
+) -> crate::view::hosted::environment::DiffPaneEnvironment {
+    cx.update(|window, app| {
+        use crate::view::hosted::environment::{DiffPaneEnvironment, DiffPreferences};
+        use crate::view::panes::diff::services::{DiffCommands, DiffServices};
+        let root = view.read(app);
+        DiffPaneEnvironment {
+            services: DiffServices {
+                store: crate::view::pane_store::PaneStore::read_only(),
+                commands: DiffCommands::default(),
+                documents: root.ui_model.read(app).documents.clone(),
+                tooltip: root.tooltip_host.downgrade(),
+            },
+            preferences: DiffPreferences::Window(root.ui_model.downgrade()),
+            window: window.window_handle(),
+        }
+    })
+}
+
+/// A session closed before the pane opened its file again still names that
+/// file; a snapshot of it, published before the store reduces the open, does
+/// not answer the open. One that echoes the open does, closed again or not,
+/// for the pane and its renderer alike.
+#[gpui::test]
+fn only_a_session_echoing_an_open_answers_it(cx: &mut gpui::TestAppContext) {
+    use crate::view::hosted::diff_pane::{DiffPaneView, HostedDiffPane};
+    use gitcomet_state::diff_session::DiffViewId;
+    let (_dir, store, view, cx) = open_repository(cx);
+    let host = cx.update(|_, app| view.read(app).extension_window.as_ref().unwrap().host());
+    let repository = cx.update(|_, app| host.active_repository(app).unwrap().unwrap());
+    let target = DiffTarget::working_tree("a.rs".into(), DiffArea::Unstaged);
+    let seed = cx.update(|_, app| {
+        host.create_diff_pane(&repository, target.clone(), DiffPaneOptions::default(), app)
+            .unwrap()
+    });
+    settle(cx, &view, &store, "seed content", |cx| {
+        cx.update(|_, app| !seed.is_loading(app))
+    });
+    let mut state = (*store.snapshot()).clone();
+    let mut closed = state.repos[0]
+        .diff_sessions
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    closed.diff_state = Default::default();
+    closed.rev += 1;
+    let environment = read_only_environment(cx, &view);
+    // No dispatcher: only the snapshots published here reach the pane.
+    let pane_entity = cx.update(|_, app| {
+        app.new(|cx| {
+            DiffPaneView::new(
+                host.clone(),
+                environment,
+                std::sync::Weak::new(),
+                repository.clone(),
+                target.clone(),
+                DiffPaneOptions::default(),
+                cx,
+            )
+        })
+    });
+    let pane = DiffPane::new(std::rc::Rc::new(HostedDiffPane {
+        entity: pane_entity.clone(),
+    }));
+    let pane_id = cx.update(|_, app| DiffViewId(pane_entity.read(app).view_id()));
+    // The pane's first open, reduced and then closed.
+    closed.open_request = Some(1);
+    Arc::make_mut(&mut state.repos[0].diff_sessions).insert(pane_id, closed.clone());
+    publish(cx, &view, Arc::new(state.clone()));
+    assert_eq!(cx.update(|_, app| pane.target(app)), None);
+
+    cx.update(|_, app| pane.set_target(target.clone(), app));
+    closed.rev += 1;
+    Arc::make_mut(&mut state.repos[0].diff_sessions).insert(pane_id, closed.clone());
+    publish(cx, &view, Arc::new(state.clone()));
+    cx.update(|_, app| {
+        assert_eq!(pane.target(app), Some(target.clone()));
+        assert!(pane.is_loading(app));
+    });
+
+    // The store reduced the second open and a close after it.
+    closed.open_request = Some(2);
+    closed.rev += 1;
+    Arc::make_mut(&mut state.repos[0].diff_sessions).insert(pane_id, closed);
+    publish(cx, &view, Arc::new(state));
+    let renderer = hosted_renderer(cx, &pane);
+    cx.update(|_, app| {
+        assert_eq!(pane.target(app), None);
+        assert!(!pane.is_loading(app));
+        let renderer = renderer.read(app);
+        assert_eq!(renderer.rendered_diff_target(), None);
+        assert!(!matches!(
+            renderer.rendered_patch_diff_loadable(),
+            Some(Loadable::Loading)
+        ));
+    });
+}
+
 #[gpui::test]
 fn retargeting_ignores_old_notifications_and_clears_files_before_loading(
     cx: &mut gpui::TestAppContext,
@@ -918,21 +1025,7 @@ fn retargeting_ignores_old_notifications_and_clears_files_before_loading(
         .unwrap()
         .clone();
     let change_list = state.repos[0].change_lists.values().next().unwrap().clone();
-    let environment = cx.update(|window, app| {
-        use crate::view::hosted::environment::{DiffPaneEnvironment, DiffPreferences};
-        use crate::view::panes::diff::services::{DiffCommands, DiffServices};
-        let root = view.read(app);
-        DiffPaneEnvironment {
-            services: DiffServices {
-                store: crate::view::pane_store::PaneStore::read_only(),
-                commands: DiffCommands::default(),
-                documents: root.ui_model.read(app).documents.clone(),
-                tooltip: root.tooltip_host.downgrade(),
-            },
-            preferences: DiffPreferences::Window(root.ui_model.downgrade()),
-            window: window.window_handle(),
-        }
-    });
+    let environment = read_only_environment(cx, &view);
     // These panes have no dispatcher: only the explicitly published snapshots
     // can advance them, making the notification-before-Open race deterministic.
     let (pane_entity, list_entity) = cx.update(|_, app| {
@@ -1003,7 +1096,10 @@ fn retargeting_ignores_old_notifications_and_clears_files_before_loading(
     let session = Arc::make_mut(&mut state.repos[0].diff_sessions)
         .get_mut(&pane_id)
         .unwrap();
+    // The store reduces the pane's second open.
     session.target = target("b.rs");
+    session.diff_target = Some(target("b.rs"));
+    session.open_request = Some(2);
     session.rev += 1;
     session.diff = Loadable::Loading;
     session.diff_file = Loadable::Loading;
@@ -1107,6 +1203,11 @@ fn the_example_changes_view_shows_picks_in_two_panes(cx: &mut gpui::TestAppConte
         cx.debug_bounds(selector(format!("hosted_diff_{current_id}_markers")))
             .is_some()
     );
+    // The flag draws as the example's icon, not as text in the lane.
+    assert!(
+        cx.debug_bounds(selector(format!("hosted_diff_{current_id}_gutter_glyph_0")))
+            .is_some()
+    );
     // The list groups by role and flags the file; its chip shows only it.
     for part in ["group_Code", "glyph_a.rs"] {
         assert!(
@@ -1142,6 +1243,33 @@ fn the_example_changes_view_shows_picks_in_two_panes(cx: &mut gpui::TestAppConte
     click_debug_selector(cx, selector(format!("hosted_diff_{current_id}_row_1")));
     publish(cx, &view, store.snapshot());
     assert!(cx.update(|_window, app| changes.read(app).notes().is_empty()));
+
+    // A discussion of the selected line shows under it in a view of the
+    // example's own; its Close button removes it.
+    click_debug_selector(cx, selector(format!("hosted_diff_{current_id}_row_0")));
+    publish(cx, &view, store.snapshot());
+    click_debug_selector(cx, "diff_bar_discuss");
+    publish(cx, &view, store.snapshot());
+    let discussion = cx.update(|_window, app| {
+        let discussions = changes.read(app).discussions();
+        assert_eq!(discussions.len(), 1);
+        discussions[0].view().entity_id().as_u64()
+    });
+    assert!(
+        cx.debug_bounds(selector(format!(
+            "hosted_diff_{current_id}_view_{discussion}"
+        )))
+        .is_some()
+    );
+    click_debug_selector(cx, "example_1_close");
+    publish(cx, &view, store.snapshot());
+    assert!(cx.update(|_window, app| changes.read(app).discussions().is_empty()));
+    assert!(
+        cx.debug_bounds(selector(format!(
+            "hosted_diff_{current_id}_view_{discussion}"
+        )))
+        .is_none()
+    );
 
     click_debug_selector(
         cx,
@@ -1459,6 +1587,241 @@ fn difftastic_file_in<'a>(
     (dir, store, view, cx, renderer)
 }
 
+/// Discarding lines with the line engine reaches the repository from a hosted
+/// pane, as staging them does: the pane's store forwards the patch.
+#[gpui::test]
+fn discarding_lines_in_a_hosted_pane_reverts_them(cx: &mut gpui::TestAppContext) {
+    let (dir, store, view, cx) = open_repository_in(cx, Arc::new(TestBackend), rust_repository());
+    let (list_id, changes) = open_changes_view(cx, &view, &store);
+    click_debug_selector(
+        cx,
+        selector(format!("hosted_file_list_{list_id}_file_b.rs")),
+    );
+    let pane = cx.update(|_window, app| changes.read(app).current().cloned().unwrap());
+    cx.update(|_window, app| {
+        pane.set_target(
+            DiffTarget::working_tree("b.rs".into(), DiffArea::Unstaged),
+            app,
+        );
+    });
+    let renderer = cx.update(|_window, app| {
+        pane.view()
+            .downcast::<crate::view::hosted::diff_pane::DiffPaneView>()
+            .unwrap()
+            .read(app)
+            .renderer()
+            .cloned()
+            .unwrap()
+    });
+    settle(cx, &view, &store, "b.rs compared line by line", |cx| {
+        cx.update(|_window, app| {
+            let renderer = renderer.read(app);
+            !renderer.structural_diff_active()
+                && renderer
+                    .rendered_diff_target()
+                    .and_then(DiffTarget::file_path)
+                    == Some(Path::new("b.rs"))
+                && renderer.is_file_diff_view_active()
+                && renderer.diff_visible_len() > 0
+        })
+    });
+    cx.update(|_window, app| {
+        renderer.update(app, |pane, cx| {
+            let last = pane.diff_visible_len() - 1;
+            pane.diff_selection_anchor = Some(0);
+            pane.diff_selection_range = Some((0, last));
+            assert!(pane.apply_diff_line_action(
+                crate::view::panes::diff::diff_text::DiffLineAction::Discard,
+                cx
+            ));
+        })
+    });
+    settle(
+        cx,
+        &view,
+        &store,
+        "b.rs reverted in the working tree",
+        |_| {
+            // Git unlinks before rewriting, so a missing file is "not yet".
+            std::fs::read_to_string(dir.path().join("b.rs"))
+                .is_ok_and(|text| text == "pub fn b() -> i32 {\n    1\n}\n")
+        },
+    );
+}
+
+/// After a right-click on a Difftastic line, with the outlined block or text
+/// on another line selected, the dismissed menu leaves that line selected, and
+/// U discards only it, as the menu's own Discard does.
+#[gpui::test]
+fn u_after_a_difftastic_right_click_discards_the_clicked_line(cx: &mut gpui::TestAppContext) {
+    for text_on_line_one in [false, true] {
+        let case = format!("text on line one: {text_on_line_one}");
+        let (dir, store, view, cx, renderer) = difftastic_file(cx, "a.rs", 4);
+        let pair = row_with_lines(&renderer, (Some(1), Some(1)), cx);
+        let added = row_with_lines(&renderer, (None, Some(2)), cx);
+        cx.update(|window, app| {
+            renderer.update(app, |pane, cx| {
+                if pane.live_focused_change_block().is_none() {
+                    pane.navigate_next_diff_change(cx);
+                }
+                assert!(pane.live_focused_change_block().is_some(), "{case}");
+                if text_on_line_one {
+                    let anchor = DiffTextPos {
+                        source_visible_ix: pair,
+                        region: DiffTextRegion::Inline,
+                        offset: 0,
+                    };
+                    pane.diff_text_anchor = Some(anchor);
+                    pane.diff_text_head = Some(DiffTextPos {
+                        offset: "pub fn a() -> i32 {".len(),
+                        ..anchor
+                    });
+                    pane.sync_diff_focus_to_text_selection();
+                    pane.diff_text_selection_owner.adopt(window, cx);
+                }
+                pane.open_diff_editor_context_menu(
+                    added,
+                    DiffTextRegion::Inline,
+                    point(px(40.0), px(40.0)),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let host = view.read(app).popover_host.clone();
+            assert!(
+                host.read(app).popover_kind_for_tests().is_some(),
+                "{case}: a menu"
+            );
+            host.update(app, |host, cx| {
+                host.close_popover_and_restore_focus(window, cx)
+            });
+            let pane = renderer.read(app);
+            assert!(pane.diff_panel_focus_handle.is_focused(window), "{case}");
+            assert!(
+                pane.live_focused_change_block().is_none(),
+                "{case}: the outline would mark lines U does not take"
+            );
+            assert_eq!(pane.diff_selection_range, Some((added, added)), "{case}");
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("u");
+        settle(cx, &view, &store, "line 2 reverted", |_| {
+            // Git unlinks before rewriting, so a missing file is "not yet".
+            std::fs::read_to_string(dir.path().join("a.rs"))
+                .is_ok_and(|text| text != "pub fn a() -> i32 {\n    let two = 2;\n    1\n}\n")
+        });
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.rs")).unwrap(),
+            "pub fn a() -> i32 {\n    1\n}\n",
+            "{case}: only the clicked line is reverted"
+        );
+    }
+}
+
+/// A Difftastic right-click selects its row as a click does: a shift-click
+/// extends from it, and a click on it again retires the menu's lines.
+#[gpui::test]
+fn row_clicks_after_a_difftastic_right_click_start_from_its_row(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, view, cx, renderer) = difftastic_file(cx, "a.rs", 4);
+    let id = first_session(&store);
+    let pair = row_with_lines(&renderer, (Some(1), Some(1)), cx);
+    let added = row_with_lines(&renderer, (None, Some(2)), cx);
+    let right_click = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, app| {
+            renderer.update(app, |pane, cx| {
+                pane.open_diff_editor_context_menu(
+                    added,
+                    DiffTextRegion::Inline,
+                    point(px(40.0), px(40.0)),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let host = view.read(app).popover_host.clone();
+            assert!(host.read(app).popover_kind_for_tests().is_some(), "a menu");
+            host.update(app, |host, cx| {
+                host.close_popover_and_restore_focus(window, cx)
+            });
+        });
+        cx.run_until_parked();
+    };
+    right_click(cx);
+    cx.update(|_window, app| {
+        renderer.update(app, |pane, _| {
+            assert!(pane.select_hosted_row(pair, true));
+            assert_eq!(
+                pane.diff_selection_range,
+                Some((pair.min(added), pair.max(added))),
+                "a shift-click extends from the right-clicked row"
+            );
+        });
+    });
+    let row = selector(format!("hosted_diff_{id}_row_{added}"));
+    click_debug_selector(cx, row);
+    cx.run_until_parked();
+    right_click(cx);
+    cx.update(|_window, app| {
+        let pane = renderer.read(app);
+        assert_eq!(pane.diff_selection_range, Some((added, added)));
+        assert!(pane.diff_editor_menu_column.is_some());
+    });
+    click_debug_selector(cx, row);
+    cx.run_until_parked();
+    cx.update(|_window, app| {
+        let pane = renderer.read(app);
+        assert_eq!(pane.diff_selection_range, Some((added, added)));
+        assert!(
+            pane.diff_editor_menu_column.is_none(),
+            "a click on the row replaces the menu's lines"
+        );
+    });
+}
+
+/// A click inside a hosted pane's text selection only drops the selection,
+/// as in any diff; it selects no row.
+#[gpui::test]
+fn a_click_in_hosted_text_drops_the_selection_without_selecting_the_row(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_dir, store, _view, cx, renderer) = difftastic_file(cx, "a.rs", 4);
+    let id = first_session(&store);
+    let pair = row_with_lines(&renderer, (Some(1), Some(1)), cx);
+    cx.update(|window, app| {
+        renderer.update(app, |pane, cx| {
+            pane.diff_selection_anchor = None;
+            pane.diff_selection_range = None;
+            let anchor = DiffTextPos {
+                source_visible_ix: pair,
+                region: DiffTextRegion::Inline,
+                offset: 0,
+            };
+            pane.set_diff_text_span(
+                anchor,
+                DiffTextPos {
+                    offset: "pub fn a() -> i32 {".len(),
+                    ..anchor
+                },
+            );
+            pane.diff_text_selection_owner.adopt(window, cx);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    click_debug_selector(cx, selector(format!("hosted_diff_{id}_row_{pair}")));
+    cx.run_until_parked();
+    cx.update(|_window, app| {
+        let pane = renderer.read(app);
+        assert!(!pane.diff_text_has_selection(), "the click drops the text");
+        assert_eq!(pane.diff_selection_range, None, "and selects no row");
+    });
+}
+
 /// The visible row of `renderer` whose line numbers are `(old, new)`.
 fn row_with_lines(
     renderer: &gpui::Entity<crate::view::panes::diff::DiffRenderer>,
@@ -1643,7 +2006,7 @@ fn a_difftastic_action_while_another_applies_is_dropped_quietly(cx: &mut gpui::T
     assert_eq!(staged(&dir), "");
 }
 
-/// F1/F4 and Alt+Left/Right step the hosted pane the user is in, as its
+/// F1/F4 step the hosted pane the user is in, as its
 /// own arrows do, and never move History's diff behind the view.
 #[gpui::test]
 fn the_file_keys_in_an_extension_view_step_its_pane_not_history(cx: &mut gpui::TestAppContext) {
@@ -1663,7 +2026,7 @@ fn the_file_keys_in_an_extension_view_step_its_pane_not_history(cx: &mut gpui::T
         })
     };
     // No pane yet: the keys have nothing to act on.
-    for key in ["f4", "alt-right", "alt-down"] {
+    for key in ["f4", "f3"] {
         cx.simulate_keystrokes(key);
         publish(cx, &view, store.snapshot());
     }
@@ -1684,7 +2047,7 @@ fn the_file_keys_in_an_extension_view_step_its_pane_not_history(cx: &mut gpui::T
         let focus = view.read(app).repository_view_focus.clone();
         window.focus(&focus, app);
     });
-    for (key, path) in [("alt-right", "b.rs"), ("alt-left", "a.rs")] {
+    for (key, path) in [("f4", "b.rs"), ("f1", "a.rs")] {
         cx.simulate_keystrokes(key);
         settle(cx, &view, &store, key, |cx| {
             current(cx) == Some(PathBuf::from(path))
@@ -1694,7 +2057,7 @@ fn the_file_keys_in_an_extension_view_step_its_pane_not_history(cx: &mut gpui::T
         let focus = app.focus_handle();
         window.focus(&focus, app);
     });
-    for (key, path) in [("alt-right", "b.rs"), ("alt-left", "a.rs")] {
+    for (key, path) in [("f4", "b.rs"), ("f1", "a.rs")] {
         cx.simulate_keystrokes(key);
         settle(cx, &view, &store, key, |cx| {
             current(cx) == Some(PathBuf::from(path))
@@ -1741,8 +2104,53 @@ fn the_file_keys_in_an_extension_view_step_its_pane_not_history(cx: &mut gpui::T
     assert!(cx.debug_bounds("diff_bar_stage").is_none());
 }
 
+/// Cmd/Ctrl+F in an extension's view opens the search of the hosted pane
+/// the user is in, as F2/F3 step it, and never History's find behind the
+/// view.
 #[gpui::test]
-fn alt_change_keys_reach_the_visible_pane_without_diff_focus(cx: &mut gpui::TestAppContext) {
+fn the_search_key_in_an_extension_view_opens_its_panes_search_not_history(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_dir, store, view, cx) = open_repository(cx);
+    cx.update(|_window, app| crate::app::bind_app_keys_for_test(app));
+    let (list_id, changes) = open_changes_view(cx, &view, &store);
+    click_debug_selector(
+        cx,
+        selector(format!("hosted_file_list_{list_id}_file_a.rs")),
+    );
+    settle(cx, &view, &store, "a.rs in the pane", |cx| {
+        store.snapshot().repos[0].diff_sessions.len() == 1
+            && row_drawn(cx, first_session(&store), 0)
+    });
+    let id = first_session(&store);
+    let pane = cx.update(|_, app| changes.read(app).current().cloned().unwrap());
+    let renderer = hosted_renderer(cx, &pane);
+    let history_find_open = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|_, app| {
+            view.read(app)
+                .main_pane
+                .read(app)
+                .history_view
+                .read(app)
+                .history_find_is_open()
+        })
+    };
+
+    click_debug_selector(cx, selector(format!("hosted_diff_{id}_row_0")));
+    publish(cx, &view, store.snapshot());
+    cx.simulate_keystrokes("secondary-f");
+    publish(cx, &view, store.snapshot());
+    assert!(cx.update(|_, app| renderer.read(app).diff_search_active));
+    let input = cx.update(|_, app| renderer.read(app).diff_search_input.clone());
+    assert!(
+        cx.update(|window, app| input.read(app).focus_handle().is_focused(window)),
+        "the pane's search has the keyboard"
+    );
+    assert!(!history_find_open(cx), "History's find stayed shut");
+}
+
+#[gpui::test]
+fn change_function_keys_reach_the_visible_pane_without_diff_focus(cx: &mut gpui::TestAppContext) {
     let (dir, store, view, cx) = open_repository(cx);
     std::fs::write(
         dir.path().join("a.rs"),
@@ -1752,6 +2160,7 @@ fn alt_change_keys_reach_the_visible_pane_without_diff_focus(cx: &mut gpui::Test
     cx.update(|_, app| {
         crate::app::bind_app_keys_for_test(app);
         crate::app::install_global_diff_navigation_actions_for_test(app);
+        crate::app::install_global_diff_shortcut_fallback_for_test(app);
     });
     let (list_id, changes) = open_changes_view(cx, &view, &store);
     click_debug_selector(
@@ -1767,7 +2176,7 @@ fn alt_change_keys_reach_the_visible_pane_without_diff_focus(cx: &mut gpui::Test
     let stops = cx.update(|_, app| renderer.read(app).diff_nav_entries());
     assert_eq!(stops.len(), 2);
     for detached in [false, true] {
-        let focus = cx.update(|window, app| {
+        cx.update(|window, app| {
             renderer.update(app, |pane, _| pane.diff_selection_anchor = Some(stops[0]));
             let focus = if detached {
                 app.focus_handle()
@@ -1775,10 +2184,9 @@ fn alt_change_keys_reach_the_visible_pane_without_diff_focus(cx: &mut gpui::Test
                 view.read(app).repository_view_focus.clone()
             };
             window.focus(&focus, app);
-            focus
         });
         publish(cx, &view, store.snapshot());
-        for (key, stop) in [("alt-down", stops[1]), ("alt-up", stops[0])] {
+        for (key, stop) in [("f7", stops[1]), ("shift-f7", stops[0])] {
             cx.simulate_keystrokes(key);
             publish(cx, &view, store.snapshot());
             assert_eq!(
@@ -1786,7 +2194,13 @@ fn alt_change_keys_reach_the_visible_pane_without_diff_focus(cx: &mut gpui::Test
                 Some(stop),
                 "{key}, detached focus: {detached}"
             );
-            assert!(cx.update(|window, _| focus.is_focused(window)));
+            // Landing on a change block focuses its diff, for S and U.
+            assert!(cx.update(|window, app| {
+                renderer
+                    .read(app)
+                    .diff_panel_focus_handle
+                    .is_focused(window)
+            }));
         }
     }
     assert!(store.snapshot().repos[0].diff_state.diff_target.is_none());
@@ -2011,7 +2425,11 @@ fn image_preview_regression_hosted_panes_zoom_without_changing_window_scale(
     cx.update(|_, app| {
         assert_eq!(
             crate::ui_scale::current(app).percent,
-            crate::ui_scale::step_up(before)
+            if cfg!(target_os = "macos") {
+                before
+            } else {
+                crate::ui_scale::step_up(before)
+            }
         )
     });
 }
@@ -2728,6 +3146,70 @@ fn panes_show_renames_additions_deletions_and_binaries_while_history_keeps_its_d
     let history = &store.snapshot().repos[0].diff_state;
     assert_eq!(history.diff_target.as_ref(), Some(&history_target));
     assert_eq!(history.diff_target_rev, history_rev);
+}
+
+#[gpui::test]
+fn a_rename_source_given_later_loads_the_old_side(cx: &mut gpui::TestAppContext) {
+    let (dir, store, view, cx) = open_repository(cx);
+    let head = commit_every_kind_of_change(dir.path());
+    let host = cx.update(|_, app| view.read(app).extension_window.as_ref().unwrap().host());
+    let repository = cx.update(|_, app| host.active_repository(app).unwrap().unwrap());
+    let moved = DiffTarget::commit(CommitId(head.into()), "moved.rs".into());
+    let pane = cx.update(|_, app| {
+        host.create_diff_pane(&repository, moved.clone(), DiffPaneOptions::default(), app)
+            .unwrap()
+    });
+    settle(cx, &view, &store, "moved.rs as an addition", |cx| {
+        cx.update(|_, app| !pane.is_loading(app))
+    });
+    assert_eq!(rows_with(cx, &pane, "row 10"), 1, "only the new side");
+
+    let renamed = moved.with_old_path(Some("orig.rs".into()));
+    cx.update(|_, app| pane.set_target(renamed.clone(), app));
+    let shown = cx.update(|_, app| pane.target(app));
+    assert_eq!(
+        shown.as_ref().and_then(|target| target.old_file_path()),
+        Some(Path::new("orig.rs"))
+    );
+    settle(cx, &view, &store, "moved.rs as a rename", |cx| {
+        cx.update(|_, app| !pane.is_loading(app))
+    });
+    assert_eq!(rows_with(cx, &pane, "row 10"), 2, "both sides of row 10");
+}
+
+#[gpui::test]
+fn a_closed_pane_opens_its_last_file_again(cx: &mut gpui::TestAppContext) {
+    let (_dir, store, view, cx) = open_repository(cx);
+    let host = cx.update(|_, app| view.read(app).extension_window.as_ref().unwrap().host());
+    let repository = cx.update(|_, app| host.active_repository(app).unwrap().unwrap());
+    let target = DiffTarget::working_tree("a.rs".into(), DiffArea::Unstaged);
+    let pane = cx.update(|_, app| {
+        host.create_diff_pane(&repository, target.clone(), DiffPaneOptions::default(), app)
+            .unwrap()
+    });
+    settle(cx, &view, &store, "a.rs", |cx| {
+        cx.update(|_, app| !pane.is_loading(app))
+    });
+    assert_eq!(rows_with(cx, &pane, "a edited 3"), 1);
+
+    // Escape and the close button.
+    let renderer = hosted_renderer(cx, &pane);
+    cx.update(|_, app| {
+        renderer.update(app, |renderer, cx| {
+            renderer.clear_diff_selection_or_exit(RepoId(1), cx)
+        })
+    });
+    settle(cx, &view, &store, "the closed pane", |cx| {
+        cx.update(|_, app| pane.target(app).is_none())
+    });
+    assert_eq!(rows_with(cx, &pane, "a edited 3"), 0);
+
+    cx.update(|_, app| pane.set_target(target.clone(), app));
+    assert_eq!(cx.update(|_, app| pane.target(app)), Some(target));
+    settle(cx, &view, &store, "a.rs again", |cx| {
+        cx.update(|_, app| !pane.is_loading(app))
+    });
+    assert_eq!(rows_with(cx, &pane, "a edited 3"), 1);
 }
 
 /// Mounts a pane's view as a window of its own.
@@ -3535,6 +4017,293 @@ fn insets_and_annotations_run_their_actions(cx: &mut gpui::TestAppContext) {
     }
 }
 
+/// Where `text`'s row starts its text in `region`: its row and left edge.
+fn text_start(
+    cx: &mut gpui::VisualTestContext,
+    pane: &DiffPane,
+    region: DiffTextRegion,
+    text: &str,
+) -> (usize, Pixels) {
+    let renderer = hosted_renderer(cx, pane);
+    cx.update(|_, app| {
+        renderer
+            .read(app)
+            .diff_text_hitboxes
+            .iter()
+            .find(|((_, at), hit)| *at == region && hit.painted_text.contains(text))
+            .map(|((row, _), hit)| (*row, hit.bounds.left()))
+            .unwrap_or_else(|| panic!("{text} is painted in {region:?}"))
+    })
+}
+
+/// An annotation's people give its pane a column before the line numbers,
+/// on each side of a split, as wide as its largest group: two circles and a
+/// "+k" draw there inside its padding, a click there runs the annotation
+/// action, and the text, and a drag selecting it, start past it. Without
+/// people the lane stays over the line numbers and nothing moves.
+#[gpui::test]
+fn people_annotations_draw_in_a_column_before_the_rows(cx: &mut gpui::TestAppContext) {
+    use gitcomet_extension_api::{DiffAnnotation, DiffAnnotations, DiffLayout, RowGlyph};
+    gitcomet_ui_kit::test_support::use_real_text_backend(cx);
+    install_example(cx);
+    let (store, events) = AppStore::new_test(Arc::new(TestBackend));
+    let (view, app_cx) =
+        cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
+    publish(app_cx, &view, Arc::new(AppState::test_default()));
+    let host =
+        app_cx.update(|_window, app| view.read(app).extension_window.as_ref().unwrap().host());
+    let annotate = |glyph: RowGlyph| {
+        DiffAnnotations::new().with(
+            DiffLineSide::New,
+            3,
+            DiffAnnotation::new(gpui::red())
+                .with_label("comments")
+                .with_glyph(glyph),
+        )
+    };
+    // With a colour-only annotation on line 1 beside them.
+    let people = |names: &[&str]| {
+        DiffAnnotations::new()
+            .with(
+                DiffLineSide::New,
+                3,
+                DiffAnnotation::new(gpui::red())
+                    .with_label("comments")
+                    .with_people(names.iter().copied()),
+            )
+            .with(DiffLineSide::New, 1, DiffAnnotation::new(gpui::blue()))
+    };
+    // The glyph sits inside the column's padding on both sides.
+    let fits = |glyph: Bounds<Pixels>, column: Bounds<Pixels>, what: &str| {
+        let padding = px(4.0) - px(0.5);
+        assert!(
+            glyph.left() - column.left() >= padding && column.right() - glyph.right() >= padding,
+            "{what}: {glyph:?} in {column:?}"
+        );
+    };
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        for _ in 0..3 {
+            cx.update(|window, app| {
+                let _ = window.draw(app);
+            });
+            cx.run_until_parked();
+        }
+    };
+
+    for (layout, regions) in [
+        (DiffLayout::Inline, &[DiffTextRegion::Inline][..]),
+        (
+            DiffLayout::Split,
+            &[DiffTextRegion::SplitLeft, DiffTextRegion::SplitRight][..],
+        ),
+    ] {
+        let clicks = Clicks::default();
+        let record = clicks.clone();
+        let pane = cx.update(|app| {
+            host.create_snapshot_pane(
+                DiffSnapshot::new("notes.txt", "one\ntwo\nthree\n", "one\nTWO\nthree\n"),
+                DiffPaneOptions {
+                    on_annotation_click: Some(std::rc::Rc::new(move |side, line, _| {
+                        record.borrow_mut().push(("annotation", side, line))
+                    })),
+                    layout,
+                    ..DiffPaneOptions::default()
+                },
+                app,
+            )
+            .unwrap()
+        });
+        cx.update(|app| pane.set_annotations(annotate(RowGlyph::Text("C".into())), app));
+        cx.run_until_parked();
+        let view_any = pane.view();
+        let (_holder, cx) = cx.add_window_view(move |_, _| PaneHolder(view_any));
+        draw(cx);
+        let id = cx.update(|_, app| {
+            pane.view()
+                .downcast::<crate::view::hosted::diff_pane::DiffPaneView>()
+                .unwrap()
+                .read(app)
+                .view_id()
+        });
+        let starts = |cx: &mut gpui::VisualTestContext| {
+            regions
+                .iter()
+                .map(|region| text_start(cx, &pane, *region, "three"))
+                .collect::<Vec<_>>()
+        };
+        let before = starts(cx);
+        let row = before.last().unwrap().0;
+        let gutter = selector(format!("hosted_diff_{id}_gutter_{row}"));
+        let glyph = selector(format!("hosted_diff_{id}_gutter_glyph_{row}"));
+        assert_eq!(
+            cx.debug_bounds(gutter).unwrap().size.width,
+            px(12.0),
+            "{layout:?}: without people the lane overlays the line numbers"
+        );
+
+        cx.update(|_, app| pane.set_annotations(people(&["Ada Lovelace"]), app));
+        draw(cx);
+        let after = starts(cx);
+        let column = cx.debug_bounds(gutter).unwrap();
+        for ((row, start), (row_after, moved)) in before.iter().zip(&after) {
+            assert_eq!(row, row_after);
+            assert!(
+                (*moved - *start - column.size.width).abs() < px(0.01),
+                "{layout:?}: each side's text starts past its column: {start:?} to {moved:?}"
+            );
+        }
+        assert!(after.last().unwrap().1 >= column.right());
+        let one = cx.debug_bounds(glyph).unwrap();
+        assert!(
+            (one.size.width - px(16.0)).abs() < px(0.01),
+            "one circle: {one:?}"
+        );
+        fits(one, column, "one person");
+        // A colour fills the lane's 12px at the column's start, not the
+        // whole column; a click anywhere in the column is still its.
+        let fill = cx
+            .debug_bounds(selector(format!("hosted_diff_{id}_gutter_fill_0")))
+            .expect("line 1's colour");
+        let first = cx
+            .debug_bounds(selector(format!("hosted_diff_{id}_gutter_0")))
+            .unwrap();
+        assert!((fill.size.width - px(12.0)).abs() < px(0.01), "{fill:?}");
+        assert_eq!(fill.left(), first.left());
+        assert!((first.size.width - column.size.width).abs() < px(0.01));
+
+        cx.update(|_, app| pane.set_annotations(people(&["Ada Lovelace", "Grace Hopper"]), app));
+        draw(cx);
+        fits(
+            cx.debug_bounds(glyph).unwrap(),
+            cx.debug_bounds(gutter).unwrap(),
+            "two people",
+        );
+        let two = cx.debug_bounds(glyph).unwrap().size.width;
+        assert!(
+            (two - px(16.0 * 1.6)).abs() <= px(0.5),
+            "two circles overlapping by two fifths: {two:?}"
+        );
+
+        let three = ["Ada Lovelace", "Grace Hopper", "Alan Turing"];
+        cx.update(|_, app| pane.set_annotations(people(&three), app));
+        draw(cx);
+        let glyph_bounds = cx.debug_bounds(glyph).unwrap();
+        assert!(
+            glyph_bounds.size.width > two + px(4.0),
+            "a third person draws as +1 after the circles: {glyph_bounds:?}"
+        );
+        fits(
+            glyph_bounds,
+            cx.debug_bounds(gutter).unwrap(),
+            "three people",
+        );
+
+        // Fourteen widen the column to fit "+12", whose text fits its room
+        // in the editor font and in the UI font alike.
+        let fourteen: Vec<String> = (0..14).map(|n| format!("Person {n}")).collect();
+        let names: Vec<&str> = fourteen.iter().map(String::as_str).collect();
+        cx.update(|_, app| pane.set_annotations(people(&names), app));
+        draw(cx);
+        let wide = cx.debug_bounds(gutter).unwrap();
+        let glyph_bounds = cx.debug_bounds(glyph).unwrap();
+        assert!(wide.size.width > column.size.width, "{wide:?}");
+        fits(glyph_bounds, wide, "fourteen people");
+        let room = glyph_bounds.size.width - two - px(2.0);
+        let editor_font =
+            cx.update(|_, app| gitcomet_ui_kit::font_preferences::current_editor_font_family(app));
+        for family in [Some(editor_font), None] {
+            let ink = cx.update(|window, _| {
+                let mut font = window.text_style().font();
+                if let Some(family) = family.clone() {
+                    font.family = family.into();
+                }
+                let run = gpui::TextRun {
+                    len: "+12".len(),
+                    font,
+                    color: gpui::black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                    letter_spacing: None,
+                };
+                window
+                    .text_system()
+                    .shape_line("+12".into(), px(10.0), &[run])
+                    .width
+            });
+            assert!(
+                ink <= room,
+                "+12 is {ink:?} in {family:?}, its room {room:?}"
+            );
+        }
+
+        click_with(cx, gutter, Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            *clicks.borrow(),
+            vec![("annotation", DiffLineSide::New, 3)],
+            "{layout:?}"
+        );
+
+        // A drag from the second line's text to the third's selects those
+        // lines on the side it is made in.
+        for region in regions {
+            let (side, second) = match region {
+                DiffTextRegion::SplitLeft => (DiffLineSide::Old, "two"),
+                _ => (DiffLineSide::New, "TWO"),
+            };
+            let renderer = hosted_renderer(cx, &pane);
+            let (from, to) = cx.update(|_, app| {
+                let renderer = renderer.read(app);
+                let hit = |text: &str| {
+                    renderer
+                        .diff_text_hitboxes
+                        .iter()
+                        .find(|((_, at), hit)| at == region && hit.painted_text.contains(text))
+                        .map(|(_, hit)| hit.bounds)
+                        .unwrap()
+                };
+                let (second, third) = (hit(second), hit("three"));
+                (
+                    point(second.left() + px(1.0), second.center().y),
+                    third.center(),
+                )
+            });
+            cx.simulate_mouse_move(from, None, Default::default());
+            cx.simulate_mouse_down(from, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), Default::default());
+            cx.simulate_mouse_up(to, gpui::MouseButton::Left, Default::default());
+            cx.run_until_parked();
+            assert_eq!(
+                cx.update(|_, app| pane.selection(app)),
+                Some(gitcomet_extension_api::DiffLineRange {
+                    side,
+                    start: 2,
+                    end: 3
+                }),
+                "{region:?}"
+            );
+            assert_eq!(
+                cx.update(|_, app| pane.selected_text(app))
+                    .as_deref()
+                    .map(|text| text.lines().next().unwrap_or("").to_string()),
+                Some(second.to_string()),
+                "{region:?}"
+            );
+        }
+
+        // Without people the column goes and the text moves back.
+        cx.update(|_, app| pane.set_annotations(annotate(RowGlyph::Text("C".into())), app));
+        draw(cx);
+        for ((_, start), (_, back)) in before.iter().zip(&starts(cx)) {
+            assert!(
+                (*back - *start).abs() < px(0.01),
+                "{layout:?}: {start:?} {back:?}"
+            );
+        }
+    }
+}
+
 /// A linked worktree of `root` on a new branch, with `a.rs` edited there.
 fn add_linked_worktree(root: &Path) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -4139,7 +4908,7 @@ fn linked_worktree_change_keys_use_the_displayed_diff(cx: &mut gpui::TestAppCont
             assert_eq!(stops.len(), 3, "{layout:?}, {content:?}");
 
             for detached in [false, true] {
-                let focus = cx.update(|window, app| {
+                cx.update(|window, app| {
                     pane.update(app, |pane, cx| {
                         pane.diff_selection_anchor = Some(stops[0]);
                         pane.diff_selection_range = None;
@@ -4151,7 +4920,6 @@ fn linked_worktree_change_keys_use_the_displayed_diff(cx: &mut gpui::TestAppCont
                         pane.read(app).diff_panel_focus_handle.clone()
                     };
                     window.focus(&focus, app);
-                    focus
                 });
                 publish(cx, &view, store.snapshot());
                 for (key, stop) in [
@@ -4161,8 +4929,6 @@ fn linked_worktree_change_keys_use_the_displayed_diff(cx: &mut gpui::TestAppCont
                     ("shift-f2", stops[0]),
                     ("f7", stops[1]),
                     ("shift-f7", stops[0]),
-                    ("alt-down", stops[1]),
-                    ("alt-up", stops[0]),
                 ] {
                     cx.simulate_keystrokes(key);
                     publish(cx, &view, store.snapshot());
@@ -4171,7 +4937,10 @@ fn linked_worktree_change_keys_use_the_displayed_diff(cx: &mut gpui::TestAppCont
                         Some(stop),
                         "{key}, {layout:?}, {content:?}, detached focus: {detached}",
                     );
-                    assert!(cx.update(|window, _| focus.is_focused(window)));
+                    // Landing on a change block focuses its diff, for S and U.
+                    assert!(cx.update(|window, app| {
+                        pane.read(app).diff_panel_focus_handle.is_focused(window)
+                    }));
                 }
             }
         }
@@ -4282,8 +5051,6 @@ fn linked_worktree_file_selection_repaints_without_mouse_movement(cx: &mut gpui:
         ("shift-f2", stops[0]),
         ("f7", stops[1]),
         ("shift-f7", stops[0]),
-        ("alt-down", stops[1]),
-        ("alt-up", stops[0]),
     ] {
         cx.simulate_keystrokes(key);
         publish(cx, &view, store.snapshot());
@@ -4617,8 +5384,77 @@ fn list_observers_follow_sort_layout_and_filter(cx: &mut gpui::TestAppContext) {
         Some(&vec![PathBuf::from("b.rs"), PathBuf::from("a.rs")])
     );
     seen.borrow_mut().clear();
-    cx.update(|_, app| list.set_filter("a.rs", app));
+    cx.update(|_, app| list.set_filter("a.rs", Default::default(), app));
     cx.run_until_parked();
     assert_eq!(seen.borrow().last(), Some(&vec![PathBuf::from("a.rs")]));
     drop(subscription);
+}
+
+/// `DiffPane::focus` asked for before the diff is drawn gives it the
+/// keyboard once it is, and Up/Down then step as in History: through the
+/// changes, then on into the next or previous file.
+#[gpui::test]
+fn a_focused_pane_steps_through_changes_into_the_next_file(cx: &mut gpui::TestAppContext) {
+    use gitcomet_extension_api::{DiffFileNavigation, HostedAction};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let (_dir, store, view, cx) = open_repository(cx);
+    let (host, repository) = cx.update(|_, app| {
+        let host = view.read(app).extension_window.as_ref().unwrap().host();
+        let repository = host.active_repository(app).unwrap().unwrap();
+        (host, repository)
+    });
+    let steps = Rc::new(RefCell::new(Vec::new()));
+    let step = |name: &'static str| {
+        let steps = Rc::clone(&steps);
+        Some(HostedAction::new(name, move |_| {
+            steps.borrow_mut().push(name)
+        }))
+    };
+    let pane = cx.update(|_, app| {
+        host.create_diff_pane(
+            &repository,
+            DiffTarget::working_tree("a.rs".into(), DiffArea::Unstaged),
+            DiffPaneOptions {
+                file_navigation: DiffFileNavigation {
+                    previous: step("previous"),
+                    next: step("next"),
+                },
+                ..DiffPaneOptions::default()
+            },
+            app,
+        )
+        .unwrap()
+    });
+    settle(cx, &view, &store, "the diff", |cx| {
+        cx.update(|_, app| !pane.is_loading(app))
+    });
+    let (_holder, cx) = cx.add_window_view(|_, _| PaneHolder(pane.view()));
+    cx.update(|window, app| pane.focus(window, app));
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        for _ in 0..3 {
+            cx.run_until_parked();
+            crate::view::test_support::redraw(cx);
+        }
+    };
+    draw(cx);
+    for _ in 0..4 {
+        cx.simulate_keystrokes("down");
+        draw(cx);
+    }
+    assert_eq!(
+        steps.borrow().first(),
+        Some(&"next"),
+        "on past the last change"
+    );
+    steps.borrow_mut().clear();
+    for _ in 0..4 {
+        cx.simulate_keystrokes("up");
+        draw(cx);
+    }
+    assert_eq!(
+        steps.borrow().first(),
+        Some(&"previous"),
+        "back past the first"
+    );
 }

@@ -4,6 +4,8 @@
 #[path = "../support/extension_formats.rs"]
 #[allow(dead_code)]
 mod formats;
+#[path = "../support/git_cli.rs"]
+mod git_cli;
 #[path = "../support/source_audit.rs"]
 mod source_audit;
 #[path = "../support/test_git_env.rs"]
@@ -19,6 +21,7 @@ mod commit_signature;
 mod comparison;
 mod conflict_base_checkout;
 mod git_cli_scoreboard;
+mod git_hooks;
 mod git_ops_trace;
 mod gitignore;
 mod large_files;
@@ -27,6 +30,7 @@ mod maintenance;
 mod operation_identity;
 mod operation_lease_guard;
 mod patch;
+mod pathspec_api_guard;
 mod refs;
 mod refs_api_guard;
 mod refs_review_regressions;

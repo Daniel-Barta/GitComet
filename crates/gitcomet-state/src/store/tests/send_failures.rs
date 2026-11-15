@@ -183,9 +183,6 @@ impl GitRepository for ReadyOpenRepo {
     fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
         Ok(())
     }
-    fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-        Ok(())
-    }
     fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
         Ok(())
     }
@@ -211,8 +208,11 @@ impl GitRepository for ReadyOpenRepo {
     fn unstage(&self, _paths: &[&Path]) -> Result<()> {
         Ok(())
     }
-    fn commit(&self, _message: &str) -> Result<()> {
-        Ok(())
+    fn commit_with_outcome(
+        &self,
+        _message: &str,
+    ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
+        Ok(gitcomet_core::services::CommitOperationOutcome::default())
     }
     fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
         let result: Result<()> = { Ok(()) };
@@ -222,8 +222,8 @@ impl GitRepository for ReadyOpenRepo {
         let result: Result<()> = { Ok(()) };
         result.map(|()| gitcomet_core::services::CommandOutput::empty_success("git pull"))
     }
-    fn push(&self) -> Result<()> {
-        Ok(())
+    fn push_with_output(&self) -> Result<CommandOutput> {
+        Ok(CommandOutput::empty_success("git push"))
     }
     fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
         Ok(())
@@ -491,9 +491,6 @@ impl GitRepository for BlockingDiffRepo {
     fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
         Ok(())
     }
-    fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-        Ok(())
-    }
     fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
         Ok(())
     }
@@ -519,8 +516,11 @@ impl GitRepository for BlockingDiffRepo {
     fn unstage(&self, _paths: &[&Path]) -> Result<()> {
         Ok(())
     }
-    fn commit(&self, _message: &str) -> Result<()> {
-        Ok(())
+    fn commit_with_outcome(
+        &self,
+        _message: &str,
+    ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
+        Ok(gitcomet_core::services::CommitOperationOutcome::default())
     }
     fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
         let result: Result<()> = { Ok(()) };
@@ -530,8 +530,8 @@ impl GitRepository for BlockingDiffRepo {
         let result: Result<()> = { Ok(()) };
         result.map(|()| gitcomet_core::services::CommandOutput::empty_success("git pull"))
     }
-    fn push(&self) -> Result<()> {
-        Ok(())
+    fn push_with_output(&self) -> Result<CommandOutput> {
+        Ok(CommandOutput::empty_success("git push"))
     }
     fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
         Ok(())
@@ -760,6 +760,11 @@ fn dropping_receiver_then_last_store_suppresses_late_open_result_store_event_fai
     started_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("open effect did not start");
+    // Let the worker finish the passes that notify before the receiver goes.
+    store
+        .barrier_for_test()
+        .recv_timeout(Duration::from_secs(1))
+        .expect("store worker barrier");
 
     drop(event_rx);
     drop(store);

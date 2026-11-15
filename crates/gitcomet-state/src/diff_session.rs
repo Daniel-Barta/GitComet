@@ -43,6 +43,9 @@ pub struct DiffSession {
     pub generation: u64,
     /// Bumped on every change to the session, for fingerprints.
     pub rev: u64,
+    /// The last [`DiffSessionMsg::Open`] request its pane numbered, so the
+    /// pane can tell a snapshot that answers it from one taken before.
+    pub open_request: Option<u64>,
     /// The complete diff state, shared with the built-in pane.
     pub diff_state: crate::model::DiffState,
     /// Once requested, blame follows subsequent reloads and retargets.
@@ -50,6 +53,7 @@ pub struct DiffSession {
     /// An external change during a load requests one more load on completion.
     pub(crate) refresh_queued: bool,
     pub(crate) pending: DiffSessionLoads,
+    pub(crate) awaiting_backend: bool,
     pub(crate) cancellation: CancellationToken,
 }
 
@@ -73,6 +77,7 @@ impl DiffSession {
             encoding: None,
             generation: 0,
             rev: 0,
+            open_request: None,
             diff_state: crate::model::DiffState {
                 diff_target: Some(target.clone()),
                 ..Default::default()
@@ -80,6 +85,7 @@ impl DiffSession {
             blame_requested: false,
             refresh_queued: false,
             pending: DiffSessionLoads::default(),
+            awaiting_backend: false,
             cancellation: CancellationToken::new(),
         }
     }
@@ -247,6 +253,7 @@ pub struct ChangeListSession {
     pub base: Option<CommitId>,
     pub(crate) refresh_queued: bool,
     pub(crate) loading: bool,
+    pub(crate) awaiting_backend: bool,
     pub(crate) cancellation: CancellationToken,
 }
 
@@ -260,6 +267,7 @@ impl ChangeListSession {
             base: None,
             refresh_queued: false,
             loading: false,
+            awaiting_backend: false,
             cancellation: CancellationToken::new(),
         }
     }
@@ -316,6 +324,9 @@ pub enum DiffSessionMsg {
         lifetime: u64,
         view: DiffViewId,
         target: DiffTarget,
+        /// The pane's number for this open, kept as the session's
+        /// `open_request`; `None` for an open its renderer asked for.
+        request: Option<u64>,
     },
     SetEncoding {
         repo_id: RepoId,

@@ -6,6 +6,9 @@ use gitcomet_core::history_find::HistoryFindQuery;
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 
+mod review;
+mod review_search;
+
 /// A commit message being edited in the commit details. Kept only while that
 /// commit stays the one shown.
 pub(in super::super) struct CommitRewordDraft {
@@ -78,13 +81,12 @@ pub(in super::super) struct DetailsPaneView {
     pub(in super::super) timezone: crate::view::date_time::Timezone,
     pub(in super::super) show_timezone: bool,
     _ui_model_subscription: gpui::Subscription,
-    _commit_message_input_subscription: gpui::Subscription,
     _commit_reword_input_subscription: gpui::Subscription,
     _history_find_subscription: gpui::Subscription,
     /// The history find bar's query, highlighted in the commit details. It
     /// lives on the history view, so this copy is what repaints the pane.
     pub(in super::super) history_find_query: Option<HistoryFindQuery>,
-    pub(in super::super) root_view: WeakEntity<GitCometView>,
+    root_view: WeakEntity<GitCometView>,
     diff_renderer: WeakEntity<DiffRenderer>,
     pub(in crate::view) tooltip_host: WeakEntity<TooltipHost>,
     notify_fingerprint: u64,
@@ -105,6 +107,22 @@ pub(in super::super) struct DetailsPaneView {
         std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
     pub(in super::super) status_section_resize: Option<StatusSectionResizeState>,
     status_section_focus_handles: [FocusHandle; 4],
+    review_file_focus_handles: [FocusHandle; 3],
+    /// Taken by any press in the pane that no child focuses, so Cmd/Ctrl-F
+    /// opens this pane's file filter.
+    details_focus: FocusHandle,
+    review_cursor: Option<(
+        RepoId,
+        crate::view::rows::FileListId,
+        review::ReviewRow,
+        usize,
+    )>,
+    pub(in crate::view) review_search_input: Entity<components::TextInput>,
+    /// The file filter bar's own layout: its width tier and overflow menu.
+    pub(in crate::view) review_search_bar: std::rc::Rc<components::QuickSearchState>,
+    review_search_list: Option<(RepoId, crate::view::rows::FileListId)>,
+    _review_search_subscription: gpui::Subscription,
+    pub(in crate::view) review_details_dismissed: bool,
 
     pub(in super::super) untracked_scroll: UniformListScrollHandle,
     pub(in super::super) unstaged_scroll: UniformListScrollHandle,
@@ -123,28 +141,17 @@ pub(in super::super) struct DetailsPaneView {
     pub(in super::super) commit_reword_scroll: ScrollHandle,
     pub(in super::super) commit_reword: Option<CommitRewordDraft>,
     pub(in super::super) commit_details_message_link_menu: Entity<components::CommitLinkMenu>,
-    pub(in super::super) commit_details_sha_link_menu: Entity<components::CommitLinkMenu>,
-    pub(in super::super) commit_details_sha_input: Entity<components::TextInput>,
-    pub(in super::super) commit_details_date_input: Entity<components::TextInput>,
-    pub(in super::super) commit_details_parent_input: Entity<components::TextInput>,
-    pub(in super::super) commit_details_parent_link_menu: Entity<components::CommitLinkMenu>,
-    /// The second and later parents of a merge. Grown on demand and never
-    /// shrunk: only as many as the shown commit has are drawn.
-    pub(in super::super) commit_details_extra_parent_fields: Vec<(
-        Entity<components::TextInput>,
-        Entity<components::CommitLinkMenu>,
-    )>,
     pub(in super::super) commit_message_drafts: FxHashMap<RepoId, SharedString>,
     pub(in super::super) commit_amend_enabled: bool,
     pub(in super::super) commit_push_after_enabled: bool,
+    /// `--no-verify` for the commit and the push after it.
+    pub(in super::super) commit_skip_hooks_enabled: bool,
     pub(in super::super) pending_commits: FxHashMap<RepoId, PendingCommit>,
     pending_amend_prefill: Option<RepoId>,
     /// Suggestion (repo and rev) already offered to the commit box, so git's
     /// prepared message is applied once and never re-applied.
     applied_commit_suggestions: rustc_hash::FxHashMap<RepoId, (u64, Option<String>)>,
-    pub(in super::super) commit_message_user_edited: bool,
-    pub(in super::super) commit_message_last_text: SharedString,
-    pub(in super::super) commit_message_programmatic_change: bool,
+    pub(in super::super) extension_commit_items: Vec<AnyView>,
 
     pub(in super::super) status_multi_selection: FxHashMap<RepoId, StatusMultiSelection>,
     pub(in super::super) status_multi_selection_last_status: FxHashMap<RepoId, (u64, u64)>,
@@ -421,9 +428,12 @@ impl DetailsPaneView {
         let commit_message_input = cx.new(|cx| {
             let mut input = components::TextInput::new(
                 components::TextInputOptions {
-                    placeholder: "Enter commit message".into(),
+                    placeholder: "What changed and why".into(),
                     multiline: true,
                     soft_wrap: true,
+                    // The commit box draws the card around the input.
+                    chromeless: true,
+                    min_lines: 4,
                     ..Default::default()
                 },
                 window,
@@ -493,56 +503,6 @@ impl DetailsPaneView {
             )
         });
 
-        let commit_details_sha_input = cx.new(|cx| {
-            let mut input =
-                components::TextInput::new(components::TextInputOptions::selectable(), window, cx);
-            input.set_display_truncation(Some(components::TextTruncationProfile::Middle), cx);
-            input
-        });
-
-        let commit_details_date_input = cx.new(|cx| {
-            components::TextInput::new(components::TextInputOptions::selectable(), window, cx)
-        });
-
-        let commit_details_parent_input = cx.new(|cx| {
-            let mut input =
-                components::TextInput::new(components::TextInputOptions::selectable(), window, cx);
-            input.set_display_truncation(Some(components::TextTruncationProfile::Middle), cx);
-            input
-        });
-        let commit_details_parent_link_menu = cx.new(|_cx| {
-            components::CommitLinkMenu::new(
-                commit_details_parent_input.clone(),
-                RepoId(0),
-                Arc::<[components::MessageLink]>::from([]),
-                "commit_details_parent_link_menu",
-                root_view.clone(),
-            )
-        });
-
-        let commit_details_sha_link_menu = cx.new(|_cx| {
-            components::CommitLinkMenu::new(
-                commit_details_sha_input.clone(),
-                RepoId(0),
-                Arc::<[components::MessageLink]>::from([]),
-                "commit_details_sha_link_menu",
-                root_view.clone(),
-            )
-        });
-
-        let commit_message_subscription = cx.observe(&commit_message_input, |this, input, cx| {
-            let next: SharedString = input.read(cx).text().to_string().into();
-            if this.commit_message_programmatic_change {
-                this.commit_message_programmatic_change = false;
-                this.commit_message_last_text = next;
-                return;
-            }
-
-            if this.commit_message_last_text != next {
-                this.commit_message_last_text = next;
-                this.commit_message_user_edited = true;
-            }
-        });
         let history_find_query = history_view.read(cx).history_find_query().cloned();
         let history_find_subscription = cx.observe(&history_view, |this, history, cx| {
             let query = history.read(cx).history_find_query();
@@ -551,6 +511,52 @@ impl DetailsPaneView {
                 cx.notify();
             }
         });
+        let review_search_input = cx.new(|cx| {
+            components::TextInput::new(
+                components::TextInputOptions {
+                    placeholder: "Filter files".into(),
+                    chromeless: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            )
+        });
+        let review_search_subscription =
+            cx.observe_in(&review_search_input, window, |this, input, window, cx| {
+                let (escape, enter, down) = input.update(cx, |input, _| {
+                    (
+                        input.take_escape_pressed(),
+                        input.take_enter_pressed(),
+                        input.take_arrow_down_pressed(),
+                    )
+                });
+                let Some((repo, list)) = this.review_search_list else {
+                    return;
+                };
+                if escape {
+                    this.review_search_escape(list, window, cx);
+                    return;
+                }
+                if enter {
+                    this.review_search_step(list, true, window, cx);
+                    return;
+                }
+                if down {
+                    // Keep the filter active while reviewing its results.
+                    this.focus_review_files(Some(list), window, cx);
+                    return;
+                }
+                let query: SharedString = input.read(cx).text().trim().to_owned().into();
+                let controller = this.file_controller(repo, list);
+                if controller.borrow().query == query {
+                    return;
+                }
+                controller.borrow_mut().query = query;
+                this.review_cursor = None;
+                this.notify_commit_file_projection_dependents(cx);
+                cx.notify();
+            });
         let mut pane = Self {
             store,
             state,
@@ -562,7 +568,6 @@ impl DetailsPaneView {
             timezone,
             show_timezone,
             _ui_model_subscription: subscription,
-            _commit_message_input_subscription: commit_message_subscription,
             _commit_reword_input_subscription: commit_reword_subscription,
             _history_find_subscription: history_find_subscription,
             history_find_query,
@@ -586,7 +591,15 @@ impl DetailsPaneView {
             worktree_filter_bounds_ref: Default::default(),
             range_filter_bounds_ref: Default::default(),
             status_section_resize: None,
-            status_section_focus_handles: std::array::from_fn(|_| cx.focus_handle()),
+            status_section_focus_handles: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            review_file_focus_handles: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            details_focus: cx.focus_handle(),
+            review_cursor: None,
+            review_search_input,
+            review_search_bar: components::QuickSearchState::new(),
+            review_search_list: None,
+            _review_search_subscription: review_search_subscription,
+            review_details_dismissed: false,
             untracked_scroll: UniformListScrollHandle::default(),
             unstaged_scroll: UniformListScrollHandle::default(),
             staged_scroll: UniformListScrollHandle::default(),
@@ -602,21 +615,14 @@ impl DetailsPaneView {
             commit_reword_scroll,
             commit_reword: None,
             commit_details_message_link_menu,
-            commit_details_sha_link_menu,
-            commit_details_sha_input,
-            commit_details_date_input,
-            commit_details_parent_input,
-            commit_details_parent_link_menu,
-            commit_details_extra_parent_fields: Vec::new(),
             commit_message_drafts: FxHashMap::default(),
             commit_amend_enabled: false,
             commit_push_after_enabled,
+            commit_skip_hooks_enabled: false,
             pending_commits: FxHashMap::default(),
             pending_amend_prefill: None,
             applied_commit_suggestions: rustc_hash::FxHashMap::default(),
-            commit_message_user_edited: false,
-            commit_message_last_text: SharedString::default(),
-            commit_message_programmatic_change: false,
+            extension_commit_items: Vec::new(),
             status_multi_selection: FxHashMap::default(),
             status_multi_selection_last_status: FxHashMap::default(),
             file_list_selection: FxHashMap::default(),
@@ -852,6 +858,55 @@ impl DetailsPaneView {
         cx.notify();
     }
 
+    /// Toggle amend from the commit box and keep the rest of the window (the
+    /// popover host mirrors the flag) in step.
+    pub(in super::super) fn toggle_commit_amend(&mut self, cx: &mut gpui::Context<Self>) {
+        let enabled = !self.commit_amend_enabled;
+        self.set_commit_amend_enabled(enabled, cx);
+        let root_view = self.root_view.clone();
+        cx.defer(move |cx| {
+            let _ = root_view.update(cx, |root, cx| root.set_commit_amend_enabled(enabled, cx));
+        });
+    }
+
+    /// Toggle hook skipping from the commit box; the root view keeps the
+    /// popover host in step.
+    pub(in super::super) fn toggle_commit_skip_hooks(&mut self, cx: &mut gpui::Context<Self>) {
+        let enabled = !self.commit_skip_hooks_enabled;
+        self.set_commit_skip_hooks_enabled(enabled, cx);
+        let root_view = self.root_view.clone();
+        cx.defer(move |cx| {
+            let _ = root_view.update(cx, |root, cx| {
+                root.set_commit_skip_hooks_enabled(enabled, cx)
+            });
+        });
+    }
+
+    pub(in super::super) fn copy_commit_sha(
+        &self,
+        commit_id: CommitId,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let root_view = self.root_view.clone();
+        cx.defer(move |cx| {
+            let _ = root_view.update(cx, |root, cx| root.copy_commit_sha(commit_id, cx));
+        });
+    }
+
+    pub(in super::super) fn reveal_commit_in_history(
+        &self,
+        repo_id: RepoId,
+        commit_id: CommitId,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let root_view = self.root_view.clone();
+        cx.defer(move |cx| {
+            let _ = root_view.update(cx, |root, cx| {
+                root.reveal_commit_in_history(repo_id, commit_id, cx)
+            });
+        });
+    }
+
     fn commit_message_is_empty(&self, cx: &gpui::Context<Self>) -> bool {
         self.commit_message_input.read(cx).text().trim().is_empty()
     }
@@ -869,13 +924,50 @@ impl DetailsPaneView {
         message: String,
         cx: &mut gpui::Context<Self>,
     ) {
-        self.commit_message_user_edited = false;
-        self.commit_message_programmatic_change = true;
-        self.commit_message_last_text = message.clone().into();
         self.commit_message_input
             .update(cx, |input, cx| input.set_text(message, cx));
         self.commit_message_scroll
             .set_offset(point(px(0.0), px(0.0)));
+    }
+
+    /// An extension's message for the repository `repo_id` held at `lifetime`:
+    /// in the box while that repository is on screen, otherwise as the draft
+    /// it shows when selected. Focus stays where it is. A repository that has
+    /// closed since the request gets nothing.
+    pub(in super::super) fn set_extension_commit_message(
+        &mut self,
+        repo_id: RepoId,
+        lifetime: u64,
+        message: String,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if !self
+            .state
+            .repos
+            .iter()
+            .any(|repo| repo.id == repo_id && repo.lifetime() == lifetime)
+        {
+            return;
+        }
+        if self.active_repo_id() == Some(repo_id) {
+            self.set_commit_message_programmatically(message, cx);
+            cx.notify();
+            return;
+        }
+        if message.is_empty() {
+            self.commit_message_drafts.remove(&repo_id);
+        } else {
+            self.commit_message_drafts.insert(repo_id, message.into());
+        }
+    }
+
+    pub(in super::super) fn set_extension_commit_items(
+        &mut self,
+        items: Vec<AnyView>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.extension_commit_items = items;
+        cx.notify();
     }
 
     fn prefill_commit_message_for_amend(&mut self, cx: &mut gpui::Context<Self>) {
@@ -919,19 +1011,26 @@ impl DetailsPaneView {
         cx.notify();
     }
 
+    pub(in super::super) fn set_commit_skip_hooks_enabled(
+        &mut self,
+        enabled: bool,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.commit_skip_hooks_enabled == enabled {
+            return;
+        }
+
+        self.commit_skip_hooks_enabled = enabled;
+        cx.notify();
+    }
+
     pub(in super::super) fn set_commit_message_from_history(
         &mut self,
         message: String,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        self.commit_message_user_edited = true;
-        self.commit_message_programmatic_change = true;
-        self.commit_message_last_text = message.clone().into();
-        self.commit_message_input
-            .update(cx, |input, cx| input.set_text(message, cx));
-        self.commit_message_scroll
-            .set_offset(point(px(0.0), px(0.0)));
+        self.set_commit_message_programmatically(message, cx);
         let focus = self
             .commit_message_input
             .read_with(cx, |input, _| input.focus_handle());
@@ -1057,7 +1156,7 @@ impl DetailsPaneView {
         path_display::cached_path_display(&mut cache, path)
     }
 
-    fn file_controller(
+    pub(in crate::view) fn file_controller(
         &self,
         repo_id: RepoId,
         list: crate::view::rows::FileListId,
@@ -1119,9 +1218,10 @@ impl DetailsPaneView {
         let mut controller = controller.borrow_mut();
         controller.sort = sort;
         controller.kind_filter = filter;
+        let (query, options) = (controller.query.clone(), controller.search_options);
         controller
             .projection_cache
-            .projection_for(&key, files, sort, filter)
+            .projection_for_query(&key, files, sort, filter, &query, options)
     }
 
     /// Drop a list's transient layout flip and collapse set, so the next time it
@@ -1246,9 +1346,10 @@ impl DetailsPaneView {
         let mut controller = controller.borrow_mut();
         controller.sort = sort;
         controller.kind_filter = filter;
+        let (query, options) = (controller.query.clone(), controller.search_options);
         controller
             .projection_cache
-            .projection_for(&key, files, sort, filter)
+            .projection_for_query(&key, files, sort, filter, &query, options)
     }
 
     pub(in super::super) fn cached_range_file_projection(
@@ -1266,9 +1367,10 @@ impl DetailsPaneView {
         let mut controller = controller.borrow_mut();
         controller.sort = sort;
         controller.kind_filter = filter;
+        let (query, options) = (controller.query.clone(), controller.search_options);
         controller
             .projection_cache
-            .projection_for(&key, files, sort, filter)
+            .projection_for_query(&key, files, sort, filter, &query, options)
     }
 
     fn file_list_plan_from_projection(
@@ -1290,6 +1392,7 @@ impl DetailsPaneView {
             self.file_list_filter_for(list),
             scope,
         );
+        let key = self.review_projection_key(repo_id, list, key);
         let collapsed = self.file_list_collapsed_for(repo_id, list);
         let controller = self.file_controller(repo_id, list);
         let mut controller = controller.borrow_mut();
@@ -1545,7 +1648,10 @@ impl DetailsPaneView {
 
     /// The cached main pane reads this projection to render commit-diff file
     /// navigation, so local sort/filter changes must invalidate it explicitly.
-    fn notify_commit_file_projection_dependents(&self, cx: &mut gpui::Context<Self>) {
+    pub(in crate::view) fn notify_commit_file_projection_dependents(
+        &self,
+        cx: &mut gpui::Context<Self>,
+    ) {
         let diff_renderer = self.diff_renderer.clone();
         cx.defer(move |cx| {
             let _ = diff_renderer.update(cx, |_pane, cx| cx.notify());
@@ -1872,6 +1978,11 @@ impl DetailsPaneView {
             sort,
             crate::view::rows::CommitFileFilter::All,
         );
+        let key = self.review_projection_key(
+            repo.id,
+            crate::view::rows::FileListId::Status(section),
+            key,
+        );
         let slot = Self::status_section_alignment_key(section) as usize;
         let mut cache = self.status_section_order.borrow_mut();
         if let Some((cached_key, indexes)) = cache[slot].as_ref()
@@ -1893,6 +2004,20 @@ impl DetailsPaneView {
             repo.line_stats_for_area(section.diff_area())
                 .filter(|_| sort.needs_line_stats()),
         );
+        let matcher = {
+            let controller =
+                self.file_controller(repo.id, crate::view::rows::FileListId::Status(section));
+            let controller = controller.borrow();
+            crate::view::rows::path_query_matcher(&controller.query, controller.search_options)
+        };
+        let ordered = match matcher {
+            None => ordered,
+            Some(matcher) => ordered
+                .iter()
+                .copied()
+                .filter(|&ix| crate::view::rows::path_matches_query(&entries[ix].path, &matcher))
+                .collect(),
+        };
         cache[slot] = Some((key, Arc::clone(&ordered)));
         Some(ordered)
     }
@@ -2396,6 +2521,7 @@ impl DetailsPaneView {
             sort,
             crate::view::rows::CommitFileFilter::All,
         );
+        let key = self.review_projection_key(repo.id, list, key);
         let collapsed = self.file_list_collapsed_for(repo.id, list);
         let entries = match section {
             StatusSection::Staged => repo.staged_status_entries(),
@@ -2517,8 +2643,26 @@ impl DetailsPaneView {
                 .and_then(|r| r.history_state.range_selection.clone())
         });
 
+        let previous_selection_rev = self
+            .active_repo()
+            .map(|repo| repo.history_state.selected_commit_rev);
         let next_repo_id = next.active_repo;
         let next_repo = next_repo_id.and_then(|id| next.repos.iter().find(|r| r.id == id));
+        let review_target = |repo: &RepoState| {
+            repo.diff_state
+                .inline_submodule_diff
+                .as_ref()
+                .map(|inline| &inline.target)
+                .or(repo.diff_state.diff_target.as_ref())
+                .cloned()
+        };
+        if self.active_repo().and_then(review_target) != next_repo.and_then(review_target) {
+            self.review_cursor = None;
+        }
+        if previous_selection_rev != next_repo.map(|repo| repo.history_state.selected_commit_rev) {
+            // Selecting the same commit again also reopens its details.
+            self.review_details_dismissed = false;
+        }
         let next_worktree_selection =
             next_repo.and_then(|r| r.history_state.worktree_selection.clone());
         let next_range_selection = next_repo.and_then(|r| r.history_state.range_selection.clone());
@@ -2577,6 +2721,15 @@ impl DetailsPaneView {
 
         let switched_repo = prev_active_repo_id != next_repo_id;
         let switched_commit = prev_selected_commit != next_selected_commit;
+        if switched_repo
+            || switched_commit
+            || prev_worktree_selection != next_worktree_selection
+            || prev_range_selection != next_range_selection
+        {
+            self.review_details_dismissed = false;
+            self.review_cursor = None;
+            self.reset_review_search(cx);
+        }
         if switched_repo || switched_commit {
             self.commit_file_filter = crate::view::rows::CommitFileFilter::All;
             // A per-list layout flip lasts as long as the thing it was made for;
@@ -2626,8 +2779,6 @@ impl DetailsPaneView {
                 .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
             self.staged_scroll
                 .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
-            self.commit_message_scroll
-                .set_offset(point(px(0.0), px(0.0)));
             self.commit_scroll.set_offset(point(px(0.0), px(0.0)));
             self.commit_files_scroll
                 .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
@@ -2635,11 +2786,7 @@ impl DetailsPaneView {
                 .and_then(|repo_id| self.commit_message_drafts.get(&repo_id).cloned())
                 .unwrap_or_default();
             restored_commit_message = Some(restore.clone());
-            self.commit_message_user_edited = false;
-            self.commit_message_programmatic_change = true;
-            self.commit_message_input
-                .update(cx, |input, cx| input.set_text(restore.to_string(), cx));
-            self.commit_message_last_text = restore;
+            self.set_commit_message_programmatically(restore.to_string(), cx);
         } else if switched_commit {
             self.commit_scroll.set_offset(point(px(0.0), px(0.0)));
             self.commit_files_scroll
@@ -2670,13 +2817,7 @@ impl DetailsPaneView {
             && apply_merge_message
             && let Some(message) = next_merge_message
         {
-            self.commit_message_user_edited = false;
-            self.commit_message_programmatic_change = true;
-            self.commit_message_last_text = message.clone().into();
-            self.commit_message_input
-                .update(cx, |input, cx| input.set_text(message, cx));
-            self.commit_message_scroll
-                .set_offset(point(px(0.0), px(0.0)));
+            self.set_commit_message_programmatically(message, cx);
         }
 
         self.apply_pending_amend_prefill(cx);
@@ -2885,25 +3026,6 @@ impl DetailsPaneView {
         &self.status_section_focus_handles[Self::status_section_alignment_key(section) as usize]
     }
 
-    /// Step the open diff through its file list without moving focus.
-    pub(in crate::view) fn defer_status_file_step(
-        &self,
-        repo_id: RepoId,
-        step: DiffFileStep,
-        window: &mut Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        let diff_renderer = self.diff_renderer.clone();
-        let window_handle = window.window_handle();
-        cx.defer(move |cx| {
-            let _ = window_handle.update(cx, |_, window, cx| {
-                let _ = diff_renderer.update(cx, |pane, cx| {
-                    pane.try_step_diff_file(repo_id, step, window, cx)
-                });
-            });
-        });
-    }
-
     /// The shared action reads and clears our selection, so release the details
     /// pane before calling it. Keep section focus for the next Space or Ctrl+A.
     pub(in crate::view) fn defer_status_stage_and_advance(
@@ -2956,22 +3078,14 @@ impl DetailsPaneView {
     pub(in super::super) fn status_section_container(
         &self,
         section: StatusSection,
-        cx: &gpui::Context<Self>,
+        cx: &mut gpui::Context<Self>,
     ) -> gpui::Div {
-        div()
-            .key_context("StatusSection")
-            .track_focus(self.status_section_focus_handle(section))
+        self.review_file_container(crate::view::rows::FileListId::Status(section), cx)
+            .key_context("ChangedFiles StatusSection")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     this.focus_status_section(section, window, cx);
-                }),
-            )
-            .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                    if this.handle_status_section_shortcut(section, &event.keystroke, window, cx) {
-                        cx.stop_propagation();
-                    }
                 }),
             )
     }
@@ -3000,15 +3114,30 @@ impl DetailsPaneView {
     }
 }
 
+impl DetailsPaneView {
+    /// Whether keyboard focus is anywhere in this pane.
+    pub(in crate::view) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.details_focus.contains_focused(window, cx)
+    }
+}
+
 impl Render for DetailsPaneView {
-    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "benchmarks"))]
         {
             self.render_count += 1;
         }
         div()
             .size_full()
-            .child(self.commit_details_view(cx))
+            .track_focus(&self.details_focus)
+            // Capture runs before children, which may stop the press (a
+            // scrollbar does); a child that focuses itself still wins.
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                if !this.details_focus.contains_focused(window, cx) {
+                    window.focus(&this.details_focus, cx);
+                }
+            }))
+            .child(self.commit_details_view(window, cx))
             .child(StatusSectionResizeTracker { view: cx.entity() })
     }
 }

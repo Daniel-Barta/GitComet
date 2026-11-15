@@ -582,20 +582,26 @@ fn review_commit_and_amend_push_wait_for_running_push() {
         let (mut repos, id_alloc, mut state, repo_id) = large_file_fixture();
         annex_repo_on(&mut state, "adjusted/main(unlocked)");
         reduce(&mut repos, &id_alloc, &mut state, Msg::Push { repo_id });
-        state.repos[0].pending.commit_retry = Some(crate::model::PendingCommitRetry {
+        state.repos[0].pending.commit_retry = Some(crate::model::CommitRequest {
             message: "ship".into(),
             amend,
             push_after_commit: true,
+            hooks: gitcomet_core::services::GitHooks::Run,
         });
         let result = Ok(gitcomet_core::services::CommitOperationOutcome {
             local_branch: Some("adjusted/main(unlocked)".into()),
             pre_head: None,
             post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
         });
-        let message = if amend {
-            InternalMsg::CommitAmendFinished { repo_id, result }
-        } else {
-            InternalMsg::CommitFinished { repo_id, result }
+        let message = InternalMsg::CommitFinished {
+            request: crate::model::CommitRequest {
+                message: "ship".into(),
+                amend,
+                push_after_commit: true,
+                hooks: gitcomet_core::services::GitHooks::Run,
+            },
+            repo_id,
+            result,
         };
         let effects = reduce(&mut repos, &id_alloc, &mut state, Msg::Internal(message));
         assert!(!runs_annex(&effects, false));
@@ -923,6 +929,7 @@ fn every_pull_and_push_path_on_an_adjusted_branch_avoids_plain_git() {
         local_branch: Some("adjusted/main(unlocked)".to_string()),
         pre_head: None,
         post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
+        hooks: gitcomet_core::services::GitHooks::Run,
     };
 
     // An adjusted branch has no upstream, so the toolbar offers set-upstream.
@@ -936,6 +943,7 @@ fn every_pull_and_push_path_on_an_adjusted_branch_avoids_plain_git() {
             repo_id,
             target: target.clone(),
             set_upstream: true,
+            hooks: gitcomet_core::services::GitHooks::Run,
         },
         Msg::SafePushAfterCommit {
             repo_id,
@@ -949,16 +957,23 @@ fn every_pull_and_push_path_on_an_adjusted_branch_avoids_plain_git() {
         finish_large_file_effects(&mut repos, &id_alloc, &mut state, &effects);
     }
 
-    state.repos[0].pending.commit_retry = Some(crate::model::PendingCommitRetry {
+    state.repos[0].pending.commit_retry = Some(crate::model::CommitRequest {
         message: "ship".to_string(),
         amend: false,
         push_after_commit: true,
+        hooks: gitcomet_core::services::GitHooks::Run,
     });
     let effects = reduce(
         &mut repos,
         &id_alloc,
         &mut state,
         Msg::Internal(crate::msg::InternalMsg::CommitFinished {
+            request: crate::model::CommitRequest {
+                message: "ship".to_string(),
+                amend: false,
+                push_after_commit: true,
+                hooks: gitcomet_core::services::GitHooks::Run,
+            },
             repo_id,
             result: Ok(gitcomet_core::services::CommitOperationOutcome {
                 local_branch: context.local_branch.clone(),

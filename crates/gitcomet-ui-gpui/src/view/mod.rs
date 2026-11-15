@@ -109,18 +109,14 @@ actions!(
     [
         DiffPrevFile,
         DiffNextFile,
-        DiffPrevSearchMatchOrChange,
-        DiffNextSearchMatchOrChange,
         DiffPrevChange,
         DiffNextChange,
         TextInputCommitSubmit,
+        TextInputCommitAndPushSubmit,
         TextInputDiffPrevFile,
         TextInputDiffNextFile,
-        TextInputDiffPrevSearchMatchOrChange,
-        TextInputDiffNextSearchMatchOrChange,
         TextInputDiffPrevChange,
         TextInputDiffNextChange,
-        OpenActiveViewSearch,
         HistoryFindPrevious,
         PopoverPromptDismiss,
         PopoverPromptTabNext,
@@ -137,43 +133,13 @@ actions!(
         ToggleRevealCommit,
         LocateFileInExplorer,
         OpenRemoteInBrowser,
+        FocusNextReviewPane,
+        FocusPreviousReviewPane,
     ]
 );
 
-/// A plain key that moves the open diff through its file list.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DiffFileStep {
-    Prev,
-    Next,
-    PageUp,
-    PageDown,
-    First,
-    Last,
-}
-
-impl DiffFileStep {
-    pub(crate) fn from_keystroke(keystroke: &gpui::Keystroke) -> Option<Self> {
-        let mods = keystroke.modifiers;
-        if mods.control || mods.alt || mods.platform || mods.function || mods.shift {
-            return None;
-        }
-        Some(match keystroke.key.as_str() {
-            "up" => Self::Prev,
-            "down" => Self::Next,
-            "pageup" => Self::PageUp,
-            "pagedown" => Self::PageDown,
-            "home" => Self::First,
-            "end" => Self::Last,
-            _ => return None,
-        })
-    }
-}
-
 /// Chords owned by a focused status section, including empty sections.
 pub(crate) fn is_status_section_shortcut(keystroke: &gpui::Keystroke) -> bool {
-    if DiffFileStep::from_keystroke(keystroke).is_some() {
-        return true;
-    }
     let mods = keystroke.modifiers;
     if mods.alt || mods.shift || mods.function {
         return false;
@@ -183,6 +149,11 @@ pub(crate) fn is_status_section_shortcut(keystroke: &gpui::Keystroke) -> bool {
     } else {
         keystroke.key == "space"
     }
+}
+
+/// Bare S or U: stage diff lines, or unstage / discard them.
+pub(crate) fn is_diff_line_key(keystroke: &gpui::Keystroke) -> bool {
+    panes::diff::diff_text::DiffLineAction::is_line_key(keystroke)
 }
 
 pub(crate) fn is_diff_shortcut_candidate(keystroke: &gpui::Keystroke) -> bool {
@@ -198,10 +169,7 @@ pub(crate) fn is_diff_shortcut_candidate(keystroke: &gpui::Keystroke) -> bool {
             && !mods.control
             && !mods.platform
             && !mods.function
-            && matches!(
-                key,
-                "e" | "i" | "s" | "w" | "up" | "down" | "left" | "right"
-            ))
+            && matches!(key, "e" | "i" | "s" | "w" | "up" | "down"))
         || ((mods.control || mods.platform)
             && !mods.alt
             && !mods.function
@@ -285,12 +253,14 @@ pub(crate) mod clone_progress;
 mod close_guards;
 mod color;
 mod command_palette;
+pub(crate) mod command_shortcuts;
 mod commands;
 mod commit_message_hover;
 mod commit_message_text;
 mod commit_signature;
 pub(crate) mod components;
 mod conflict_markers;
+mod review_navigation;
 pub(crate) use gitcomet_conflict_resolver as conflict_resolver;
 mod conflict_style_cache;
 #[cfg(feature = "benchmarks")]
@@ -302,6 +272,7 @@ use gitcomet_ui_media::rendered_preview::{
 use gitcomet_ui_media::{diagram_preview, image_preview, rendered_preview};
 #[cfg(feature = "benchmarks")]
 pub use image_preview::benchmarks::ImageInspectionFixture;
+mod canvas_overlays;
 mod diff_commands;
 pub(crate) mod diff_navigation;
 mod diff_preview;
@@ -381,7 +352,9 @@ use gitcomet_ui_kit::zoom_wheel;
 pub(crate) use gitcomet_ui_kit::{file_icons, icons, tooltip, tooltip_host};
 mod update_check;
 mod workspace_picker;
-pub(crate) use update_check::{update_checks_available, update_checks_disabled_by_environment};
+pub(crate) use update_check::{
+    manual_update_check_unavailable, update_checks_available, update_checks_disabled_by_environment,
+};
 mod user_survey;
 use gitcomet_core::word_diff;
 
@@ -528,6 +501,9 @@ const fn history_message_text_left_px(show_graph_color_marker: bool) -> f32 {
         HISTORY_COL_HANDLE_PX / 2.0
     }
 }
+
+/// An extension's row-mark icon, the size of the hosted file list's glyph.
+const ROW_MARK_ICON_PX: f32 = 14.0;
 
 const PANE_RESIZE_HANDLE_PX: f32 = 8.0;
 const PANE_COLLAPSED_PX: f32 = 34.0;
@@ -729,7 +705,8 @@ impl Element for UiScaleScrollCapture {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if !renders_full_chrome(self.view.read(cx).view_mode) {
+        // macOS uses Command +/- for window scaling; scrolling belongs to content.
+        if cfg!(target_os = "macos") || !renders_full_chrome(self.view.read(cx).view_mode) {
             return;
         }
 
@@ -793,7 +770,7 @@ fn active_merge_view_target(state: &AppState) -> Option<(RepoId, DiffTarget)> {
 
 #[cfg(test)]
 pub(in crate::view) fn pane_resize_drag_width_bounds(
-    handle: PaneResizeHandle,
+    handle: SidePane,
     start_sidebar: Pixels,
     start_details: Pixels,
     total_w: Pixels,
@@ -801,8 +778,8 @@ pub(in crate::view) fn pane_resize_drag_width_bounds(
     details_collapsed: bool,
 ) -> (Pixels, Pixels) {
     let (min_width, other_width, other_collapsed) = match handle {
-        PaneResizeHandle::Sidebar => (px(SIDEBAR_MIN_PX), start_details, details_collapsed),
-        PaneResizeHandle::Details => (px(DETAILS_MIN_PX), start_sidebar, sidebar_collapsed),
+        SidePane::Sidebar => (px(SIDEBAR_MIN_PX), start_details, details_collapsed),
+        SidePane::Details => (px(DETAILS_MIN_PX), start_sidebar, sidebar_collapsed),
     };
     pane_resize_drag_width_bounds_for_other_pane(
         min_width,

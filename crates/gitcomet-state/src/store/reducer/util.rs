@@ -13,7 +13,7 @@ use gitcomet_core::domain::{
     CommitId, DiffArea, DiffTarget, FileStatus, FileStatusKind, SignatureFormats,
 };
 use gitcomet_core::error::{Error, ErrorKind, GitFailure, GitFailureId};
-use gitcomet_core::services::CommandOutput;
+use gitcomet_core::services::{CommandOutput, UPSTREAM_CONFIG_WRITE_FAILED};
 use rustc_hash::FxHashSet;
 use smallvec::{Array, SmallVec};
 use std::io;
@@ -296,14 +296,20 @@ fn classify_diff_target(
 ) -> DiffTargetClassification {
     let is_submodule = match target {
         DiffTarget::WorkingTree { path, area, .. } => {
-            let first = repo_state
-                .status_entries_for_area(*area)
-                .into_iter()
-                .flatten()
-                .find(|entry| entry.path == *path);
-            match worktree_submodule_source_for_entry(repo_state, path, first) {
-                WorktreeSubmoduleSource::Known(value) => value,
-                WorktreeSubmoduleSource::Marker => inputs.worktree_marker(repo_state, path),
+            match repo_state.status_entries_for_area(*area) {
+                // A resumed tab plans its kept selection before status reloads.
+                None => matches!(
+                    &repo_state.submodules,
+                    Loadable::Ready(submodules)
+                        if submodules.iter().any(|submodule| submodule.path == *path)
+                ),
+                Some(entries) => {
+                    let first = entries.iter().find(|entry| entry.path == *path);
+                    match worktree_submodule_source_for_entry(repo_state, path, first) {
+                        WorktreeSubmoduleSource::Known(value) => value,
+                        WorktreeSubmoduleSource::Marker => inputs.worktree_marker(repo_state, path),
+                    }
+                }
             }
         }
         // A comparison has no submodule summary; its submodule rows keep the
@@ -1111,6 +1117,17 @@ pub(super) fn push_diagnostic(
     });
 }
 
+/// Records `error` as a diagnostic and returns it as the failed load.
+pub(super) fn error_loadable<T>(
+    inputs: &ReducerInputs,
+    repo_state: &mut RepoState,
+    error: &Error,
+) -> Loadable<T> {
+    let message = error.to_string();
+    push_diagnostic(inputs, repo_state, DiagnosticKind::Error, message.clone());
+    Loadable::Error(message)
+}
+
 pub(super) fn handle_session_persist_result(
     inputs: &ReducerInputs,
     state: &mut AppState,
@@ -1341,6 +1358,18 @@ fn sequencer_operation_label(output: &CommandOutput, error: Option<&Error>) -> &
         .unwrap_or("Rebase")
 }
 
+/// How a push ended, from its stderr. One that sets an upstream (`-u`, or
+/// `push.autoSetupRemote`) exits 0 when only saving the upstream failed.
+fn push_outcome(output: &CommandOutput) -> &'static str {
+    if output.stderr.contains(UPSTREAM_CONFIG_WRITE_FAILED) {
+        "Pushed, but the upstream was not saved"
+    } else if output.stderr.contains("Everything up-to-date") {
+        "Everything up-to-date"
+    } else {
+        "Completed"
+    }
+}
+
 fn summarize_command(
     command: &RepoCommandKind,
     output: &CommandOutput,
@@ -1532,38 +1561,14 @@ fn summarize_command(
             };
             format!("Squash {reference}: {base}")
         }
-        RepoCommandKind::Push => {
-            if output.stderr.contains("Everything up-to-date") {
-                "Push: Everything up-to-date".to_string()
-            } else {
-                "Push: Completed".to_string()
-            }
-        }
+        RepoCommandKind::Push => format!("Push: {}", push_outcome(output)),
         RepoCommandKind::PushAfterCommit { set_upstream, .. } => {
-            let base = if output.stderr.contains("Everything up-to-date") {
-                "Everything up-to-date"
-            } else {
-                "Completed"
-            };
-            if *set_upstream {
-                format!("Push after commit -u: {base}")
-            } else {
-                format!("Push after commit: {base}")
-            }
+            let flag = if *set_upstream { " -u" } else { "" };
+            format!("Push after commit{flag}: {}", push_outcome(output))
         }
-        RepoCommandKind::ForcePush => {
-            if output.stderr.contains("Everything up-to-date") {
-                "Force push: Everything up-to-date".to_string()
-            } else {
-                "Force push: Completed".to_string()
-            }
-        }
+        RepoCommandKind::ForcePush => format!("Force push: {}", push_outcome(output)),
         RepoCommandKind::ForcePushWithLease { .. } => {
-            if output.stderr.contains("Everything up-to-date") {
-                "Force push with lease: Everything up-to-date".to_string()
-            } else {
-                "Force push with lease: Completed".to_string()
-            }
+            format!("Force push with lease: {}", push_outcome(output))
         }
         RepoCommandKind::PushWithTags { request } => format!(
             "{} to {}/{}: Completed",
@@ -1572,12 +1577,7 @@ fn summarize_command(
             request.branch
         ),
         RepoCommandKind::PushSetUpstream { remote, branch } => {
-            let base = if output.stderr.contains("Everything up-to-date") {
-                "Everything up-to-date"
-            } else {
-                "Completed"
-            };
-            format!("Push -u {remote}/{branch}: {base}")
+            format!("Push -u {remote}/{branch}: {}", push_outcome(output))
         }
         RepoCommandKind::SetUpstreamBranch { branch, upstream } => {
             format!(

@@ -1,16 +1,17 @@
 use crate::model::{BranchExistsPromptOperation, BranchExistsPromptState};
 use crate::msg::{InternalMsg, Msg, RepoActionKind, RepoPathList};
 use crate::store::repository_runtime::RepositoryRuntimes;
-use gitcomet_core::auth::{ScopedStagedGitAuth, StagedGitAuth};
+use gitcomet_core::auth::StagedGitAuth;
 use gitcomet_core::error::{Error, ErrorKind, GitFailureId};
-use gitcomet_core::services::{CheckoutRemoteBranchMode, GitBackend, GitRepository};
+use gitcomet_core::services::{CheckoutRemoteBranchMode, GitBackend, GitHooks, GitRepository};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::super::{RepoId, executor::TaskExecutor, worker_channel::StoreWorkerSender};
 use super::util::{
-    GitOperationTask, message_subject, missing_repo_error, path_context, paths_context,
-    send_or_log, short_commit_id, single_line_context, spawn_with_repo, spawn_with_repo_or_else,
+    GitOperationTask, SKIPPING_HOOKS_CONTEXT, message_subject, missing_repo_error, path_context,
+    paths_context, run_with_git_auth, send_or_log, short_commit_id, single_line_context,
+    spawn_with_repo, spawn_with_repo_or_else,
 };
 
 /// Runs a repo action against the repo's handle, or finishes it at once when
@@ -196,19 +197,6 @@ fn dedup_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
     paths.sort();
     paths.dedup();
     paths
-}
-
-fn run_with_git_auth<R>(
-    auth: Option<StagedGitAuth>,
-    run: impl FnOnce() -> Result<R, Error>,
-) -> Result<R, Error> {
-    if let Some(auth) = auth {
-        // The guard clears the staged auth on success, error, and panic.
-        let _scoped = ScopedStagedGitAuth::stage(auth);
-        run()
-    } else {
-        run()
-    }
 }
 
 /// Where an action on a branch runs: here, or in the other worktree that has
@@ -968,55 +956,47 @@ pub(super) fn schedule_discard_worktree_changes_paths(
     );
 }
 
+fn commit_context(message: &str, hooks: GitHooks) -> Option<String> {
+    let subject = message_subject(message).unwrap_or_else(|| "No commit message".to_string());
+    Some(if hooks.skipped() {
+        format!("{subject} · {SKIPPING_HOOKS_CONTEXT}")
+    } else {
+        subject
+    })
+}
+
 pub(super) fn schedule_commit(
     executor: &TaskExecutor,
     repos: &RepositoryRuntimes,
     msg_tx: StoreWorkerSender,
     repo_id: RepoId,
-    message: String,
+    request: crate::model::CommitRequest,
     identity: Option<gitcomet_core::commit_identity::CommitIdentity>,
     auth: Option<StagedGitAuth>,
 ) {
-    let context = message_subject(&message).or_else(|| Some("No commit message".to_string()));
+    let context = commit_context(&request.message, request.hooks);
+    let (message, amend, hooks) = (request.message.clone(), request.amend, request.hooks);
     schedule_repo_action_with_result(
         executor,
         repos,
         msg_tx,
         repo_id,
-        "Commit",
+        if amend { "Amend commit" } else { "Commit" },
         context,
         move |repo| {
             run_with_git_auth(auth, || {
-                repo.commit_with_identity(&message, identity.as_ref())
+                if amend {
+                    repo.commit_amend_with_hooks(&message, identity.as_ref(), hooks)
+                } else {
+                    repo.commit_with_hooks(&message, identity.as_ref(), hooks)
+                }
             })
         },
-        |repo_id, result| InternalMsg::CommitFinished { repo_id, result },
-    );
-}
-
-pub(super) fn schedule_commit_amend(
-    executor: &TaskExecutor,
-    repos: &RepositoryRuntimes,
-    msg_tx: StoreWorkerSender,
-    repo_id: RepoId,
-    message: String,
-    identity: Option<gitcomet_core::commit_identity::CommitIdentity>,
-    auth: Option<StagedGitAuth>,
-) {
-    let context = message_subject(&message).or_else(|| Some("No commit message".to_string()));
-    schedule_repo_action_with_result(
-        executor,
-        repos,
-        msg_tx,
-        repo_id,
-        "Amend commit",
-        context,
-        move |repo| {
-            run_with_git_auth(auth, || {
-                repo.commit_amend_with_identity(&message, identity.as_ref())
-            })
+        move |repo_id, result| InternalMsg::CommitFinished {
+            repo_id,
+            request,
+            result,
         },
-        |repo_id, result| InternalMsg::CommitAmendFinished { repo_id, result },
     );
 }
 

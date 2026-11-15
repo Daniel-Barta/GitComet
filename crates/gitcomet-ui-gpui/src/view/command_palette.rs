@@ -61,6 +61,8 @@ pub(crate) enum Needs {
     Push,
     /// A remote whose URL points at a web page.
     RemoteWebPage,
+    /// "Check for updates" has a check to run.
+    UpdateCheck,
     MacOs,
     Linux,
     /// Git can run `git lfs`.
@@ -104,6 +106,8 @@ pub(crate) struct PaletteContext {
     pub(crate) repo_uses_annex: bool,
     pub(crate) annex_initialized: bool,
     pub(crate) annex_adjusted: bool,
+    /// "Check for updates" has a check to run, as the menus decide.
+    pub(crate) update_check: bool,
 }
 
 const GIT_LFS_MISSING: &str = "Install Git LFS where Git can find it first";
@@ -148,6 +152,7 @@ pub(crate) fn unavailable_reason(needs: Needs, ctx: &PaletteContext) -> Option<&
         Needs::Pull => ctx.pull_unavailable,
         Needs::Push => ctx.push_unavailable,
         Needs::RemoteWebPage => ctx.remote_web_page_unavailable,
+        Needs::UpdateCheck => (!ctx.update_check).then_some("Update checks are not available here"),
         Needs::MacOs => (!cfg!(target_os = "macos")).then_some("Only available on macOS"),
         Needs::Linux => (!cfg!(any(target_os = "linux", target_os = "freebsd")))
             .then_some("Only available on Linux"),
@@ -194,7 +199,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::Commit.id(),
         label: "Commit Changes",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-alt-enter"),
         category: "Commit",
         keywords: "",
         requires_repo: true,
@@ -203,7 +208,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::StageAll.id(),
         label: "Stage All Changes",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-alt-s"),
         category: "Working Copy",
         keywords: "",
         requires_repo: true,
@@ -212,7 +217,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::UnstageAll.id(),
         label: "Unstage All Changes",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-alt-u"),
         category: "Working Copy",
         keywords: "",
         requires_repo: true,
@@ -221,7 +226,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::CreateBranch.id(),
         label: "Create Branch",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-alt-n"),
         category: "Branch",
         keywords: "",
         requires_repo: true,
@@ -230,7 +235,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::CheckoutBranch.id(),
         label: "Checkout Branch",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-alt-c"),
         category: "Branch",
         keywords: "",
         requires_repo: true,
@@ -302,7 +307,11 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::Pull.id(),
         label: "Pull",
-        shortcut: Shortcut::None,
+        shortcut: if cfg!(target_os = "macos") {
+            Shortcut::Keystrokes("cmd-alt-down")
+        } else {
+            Shortcut::None
+        },
         category: "Sync",
         keywords: "",
         requires_repo: true,
@@ -311,7 +320,11 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::Push.id(),
         label: "Push",
-        shortcut: Shortcut::None,
+        shortcut: if cfg!(target_os = "macos") {
+            Shortcut::Keystrokes("cmd-alt-up")
+        } else {
+            Shortcut::None
+        },
         category: "Sync",
         keywords: "",
         requires_repo: true,
@@ -347,7 +360,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::Stash.id(),
         label: "Stash Changes",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-shift-s"),
         category: "Stash",
         keywords: "",
         requires_repo: true,
@@ -431,7 +444,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::ReloadRepository.id(),
         label: "Reload Repository",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-r"),
         category: "Repository",
         keywords: "",
         requires_repo: true,
@@ -449,7 +462,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::FetchAll.id(),
         label: "Fetch All",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-shift-f"),
         category: "Repository",
         keywords: "",
         requires_repo: true,
@@ -476,7 +489,11 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::OpenExternalTerminal.id(),
         label: "Open in External Terminal",
-        shortcut: Shortcut::None,
+        shortcut: if cfg!(target_os = "macos") {
+            Shortcut::Keystrokes("cmd-alt-t")
+        } else {
+            Shortcut::None
+        },
         category: "Repository",
         keywords: "terminal shell console external",
         requires_repo: true,
@@ -485,7 +502,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::ToggleSidebar.id(),
         label: "Toggle Sidebar",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-b"),
         category: "View",
         keywords: "",
         requires_repo: true,
@@ -494,7 +511,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::ToggleDetails.id(),
         label: "Toggle Details Pane",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-alt-b"),
         category: "View",
         keywords: "",
         requires_repo: true,
@@ -539,7 +556,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         id: Command::ToggleTerminal.id(),
         label: "Toggle Terminal",
-        shortcut: Shortcut::None,
+        shortcut: Shortcut::Keystrokes("secondary-j"),
         category: "View",
         keywords: "terminal shell console show hide panel",
         requires_repo: true,
@@ -760,7 +777,7 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
         category: "Window",
         keywords: "update upgrade version release",
         requires_repo: false,
-        needs: Needs::Nothing,
+        needs: Needs::UpdateCheck,
     },
     CommandEntry {
         id: Command::InstallDesktopIntegration.id(),
@@ -848,7 +865,15 @@ pub(crate) const COMMANDS: &[CommandEntry] = &[
     },
     // TODO: "undo"              - Undo (Edit)
     // TODO: "redo"              - Redo (Edit)
-    // TODO: "keyboard-shortcuts" - Keyboard Shortcuts (Help)
+    CommandEntry {
+        id: Command::KeyboardShortcuts.id(),
+        label: "Keyboard Shortcuts",
+        shortcut: Shortcut::Keystrokes("secondary-/"),
+        category: "Help",
+        keywords: "cheat sheet keybindings hotkeys reference keyboard help",
+        requires_repo: false,
+        needs: Needs::Nothing,
+    },
     // TODO: "search-commits"   - Search Commits (Navigation)
     // TODO: "checkout-remote-branch" - Checkout Remote Branch
     // TODO: "delete-remote-branch"   - Delete Remote Branch
@@ -1994,6 +2019,13 @@ mod tests {
                 Needs::Sequencer,
                 PaletteContext {
                     sequencer: true,
+                    ..ctx.clone()
+                },
+            ),
+            (
+                Needs::UpdateCheck,
+                PaletteContext {
+                    update_check: true,
                     ..ctx.clone()
                 },
             ),

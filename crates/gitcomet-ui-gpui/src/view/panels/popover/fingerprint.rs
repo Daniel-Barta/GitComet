@@ -214,6 +214,7 @@ fn repo_for_popover<'a>(
         | PopoverKind::UiScalePicker
         | PopoverKind::Hosted { .. }
         | PopoverKind::ErrorDetails { .. }
+        | PopoverKind::KeyboardShortcuts
         | PopoverKind::FilesystemConflict(_)
         | PopoverKind::DeletePermanentlyConfirm(_)
         | PopoverKind::FilesystemUnsavedEditsConfirm(_) => None,
@@ -531,10 +532,7 @@ fn hash_repo_for_popover<H: Hasher>(
             repo.history_state.log_rev.hash(hasher);
             repo.ops_rev.hash(hasher);
             repo.history_rewrite_busy().hash(hasher);
-            if let Some(mark) = &repo.navigation.comparison_mark {
-                mark.commit_id.hash(hasher);
-                mark.label.hash(hasher);
-            }
+            repo.navigation.comparison_mark.hash(hasher);
         }
         PopoverKind::TagMenu { .. } => {
             repo.tags_rev.hash(hasher);
@@ -636,6 +634,7 @@ fn hash_repo_for_popover<H: Hasher>(
         | PopoverKind::CloneRepo
         | PopoverKind::ReflogEntryMenu { .. }
         | PopoverKind::ErrorDetails { .. }
+        | PopoverKind::KeyboardShortcuts
         | PopoverKind::Hosted { .. }
         | PopoverKind::CommitPrompt { .. } => {}
         PopoverKind::Repo {
@@ -768,14 +767,9 @@ fn hash_popover_kind<H: Hasher>(kind: &PopoverKind, hasher: &mut H) {
             missing.hash(hasher);
             load_remote_image_url.hash(hasher);
         }
-        PopoverKind::CommitShaLinkMenu {
-            repo_id,
-            commit_id,
-            allow_navigate,
-        } => {
+        PopoverKind::CommitShaLinkMenu { repo_id, commit_id } => {
             repo_id.hash(hasher);
             commit_id.hash(hasher);
-            allow_navigate.hash(hasher);
         }
         PopoverKind::DiffActionMenu => {}
         PopoverKind::MergetoolSettingsMenu => {}
@@ -962,6 +956,7 @@ fn hash_popover_kind<H: Hasher>(kind: &PopoverKind, hasher: &mut H) {
             path,
             hunks_count,
             lines_count,
+            context_actions,
             ..
         } => {
             repo_id.hash(hasher);
@@ -969,6 +964,7 @@ fn hash_popover_kind<H: Hasher>(kind: &PopoverKind, hasher: &mut H) {
             path.hash(hasher);
             hunks_count.hash(hasher);
             lines_count.hash(hasher);
+            context_actions.hash(hasher);
         }
         PopoverKind::ConflictResolverInputRowMenu {
             line_label,
@@ -1227,6 +1223,7 @@ fn hash_popover_kind<H: Hasher>(kind: &PopoverKind, hasher: &mut H) {
         PopoverKind::ErrorDetails { toast_id } => {
             toast_id.hash(hasher);
         }
+        PopoverKind::KeyboardShortcuts => {}
     }
 }
 

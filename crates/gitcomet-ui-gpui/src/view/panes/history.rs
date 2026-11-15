@@ -216,7 +216,6 @@ impl PendingHistoryMembers {
                 anchor: anchor.clone(),
                 anchor_index: Some(*anchor_index),
                 anchor_log_rev: Some(*log_rev),
-                compare_pair: false,
                 working_tree: false,
             },
         }
@@ -612,6 +611,7 @@ pub(in super::super) struct HistoryView {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::view) enum HistoryRowHoverArea {
     Signature,
+    ComparisonMark,
     Date,
     Author,
 }
@@ -785,6 +785,7 @@ impl HistoryView {
             repo.stashes_rev.hash(&mut hasher);
             repo.history_state.selected_commit_rev.hash(&mut hasher);
             repo.history_state.indexed.rev.hash(&mut hasher);
+            repo.navigation.comparison_mark.hash(&mut hasher);
             // The browsed commit's mark. Not `file_browser_rev`: that moves on
             // every sidebar search keystroke.
             repo.file_browser.source.hash(&mut hasher);
@@ -844,6 +845,9 @@ impl HistoryView {
             let signatures_changed = previous_repo
                 .map(|repo| repo.history_state.commit_signatures_rev)
                 != next_repo.map(|repo| repo.history_state.commit_signatures_rev);
+            let comparison_mark_changed = previous_repo
+                .map(|repo| &repo.navigation.comparison_mark)
+                != next_repo.map(|repo| &repo.navigation.comparison_mark);
             let index_status_changed = previous_repo
                 .map(|repo| repo.history_state.indexed.status_rev)
                 != next_repo.map(|repo| repo.history_state.indexed.status_rev);
@@ -867,6 +871,7 @@ impl HistoryView {
                 this.pending_history_selections.drain(..=ix);
             }
             this.state = next;
+            this.prune_retained_indexed_history();
             if selected_remote_branch_is_missing(&this.state, this.selected_branch.as_ref()) {
                 this.selected_branch = None;
             }
@@ -900,11 +905,14 @@ impl HistoryView {
                 }
             }
 
-            if signatures_changed
-                && matches!(this.row_hover, Some((_, HistoryRowHoverArea::Signature)))
-            {
-                // Verification can remove or replace a badge under a resting
-                // pointer. Its old verdict must not survive in the tooltip.
+            let hovered_badge_changed = match this.row_hover {
+                Some((_, HistoryRowHoverArea::Signature)) => signatures_changed,
+                Some((_, HistoryRowHoverArea::ComparisonMark)) => comparison_mark_changed,
+                Some((_, HistoryRowHoverArea::Date | HistoryRowHoverArea::Author)) | None => false,
+            };
+            if hovered_badge_changed {
+                // A badge can be removed or replaced under a resting pointer.
+                // Its old text must not survive in the tooltip.
                 this.update_history_row_hover(None, None, cx);
             }
             if changed {
@@ -920,7 +928,7 @@ impl HistoryView {
             }
         });
 
-        let history_panel_focus_handle = cx.focus_handle().tab_index(0).tab_stop(false);
+        let history_panel_focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
         let default_design_widths = default_history_column_design_widths();
         let scale = ui_scale::UiScale::from_percent(ui_scale_percent);
         let default_widths = scaled_history_column_widths(default_design_widths, scale);

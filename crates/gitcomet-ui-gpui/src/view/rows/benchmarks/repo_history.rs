@@ -584,6 +584,7 @@ pub(in crate::view) fn hash_branch_sidebar_rows(rows: &[BranchSidebarRow]) -> u6
                 tooltip.len().hash(&mut h);
             }
             BranchSidebarRow::SectionSpacer
+            | BranchSidebarRow::EmptyCard { .. }
             | BranchSidebarRow::WorktreesHeader { .. }
             | BranchSidebarRow::WorktreePlaceholder { .. }
             | BranchSidebarRow::SubmodulesHeader { .. }
@@ -686,7 +687,7 @@ impl BranchSidebarFixture {
 }
 
 // ---------------------------------------------------------------------------
-// Branch sidebar cache simulation benchmarks (Phase 1)
+// Branch sidebar cache simulation benchmarks
 // ---------------------------------------------------------------------------
 
 /// Metrics emitted as sidecar JSON for branch sidebar cache benchmarks.

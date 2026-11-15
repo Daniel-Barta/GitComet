@@ -846,6 +846,7 @@ impl PopoverHost {
             change_tracking_view,
             commit_amend_enabled: false,
             commit_push_after_enabled,
+            commit_skip_hooks_enabled: false,
             diff_content_mode,
             diff_whitespace_mode,
             diff_reveal_whitespace_chars,
@@ -891,6 +892,7 @@ impl PopoverHost {
             error_details_text: Default::default(),
             error_details_scroll: ScrollHandle::new(),
             error_details_rail_scroll: ScrollHandle::new(),
+            keyboard_shortcuts: keyboard_shortcuts::State::new(),
             commit_mainline: None,
             force_push_lease: None,
             context_menu_focus_handle,
@@ -917,6 +919,7 @@ impl PopoverHost {
             cached_pinned_repos: Vec::new(),
             cached_workspaces: Vec::new(),
             cached_workspace_id: None,
+            extension_update_check: crate::view::extension_host::provides_update_check(cx),
             extension_app_menu: crate::view::extension_host::menu_entries(
                 gitcomet_extension_api::MenuLocation::Application,
                 cx,
@@ -925,6 +928,7 @@ impl PopoverHost {
                 gitcomet_extension_api::MenuLocation::RepositoryTab,
                 cx,
             ),
+            extension_ref_menu: crate::view::extension_host::ref_menu_entries(cx),
             cached_collapsed_picker_sections: std::collections::BTreeSet::new(),
             repo_picker_sort: repo_picker::RepoPickerSort::default(),
             repo_picker_sort_menu_open: false,
@@ -1980,6 +1984,7 @@ impl PopoverHost {
             window.focus(&self.context_menu_focus_handle, cx);
         } else {
             match &kind {
+                PopoverKind::KeyboardShortcuts => keyboard_shortcuts::open(self, window, cx),
                 PopoverKind::ErrorDetails { toast_id } => {
                     self.error_details_selected = Some(*toast_id);
                     self.error_details_text = Default::default();

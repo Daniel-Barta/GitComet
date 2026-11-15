@@ -3,12 +3,12 @@
 use super::commands::Command;
 use super::{
     AnnexPopoverKind, AnnexPrompt, BranchPickerPurpose, CloseWindow, DecreaseUiScale, DiffArea,
-    DiffViewMode, GitCometView, IncreaseUiScale, Loadable, Msg, NewWindow, OpenActiveViewSearch,
-    OpenRepository, PopoverKind, PullMode, PushRequest, RemotePopoverKind, RepoPopoverKind,
-    ResetUiScale, StashPickerPurpose, SubmodulePopoverKind, ToggleRevealCommit, Window,
-    WorktreePopoverKind, command_palette, components, head_branch_has_live_upstream,
-    head_is_detached, push_request,
+    DiffViewMode, GitCometView, IncreaseUiScale, Loadable, Msg, NewWindow, OpenRepository,
+    PopoverKind, PullMode, PushRequest, RemotePopoverKind, RepoPopoverKind, ResetUiScale,
+    StashPickerPurpose, SubmodulePopoverKind, ToggleRevealCommit, Window, WorktreePopoverKind,
+    command_palette, components, head_branch_has_live_upstream, head_is_detached, push_request,
 };
+use crate::kit::search_keys::OpenActiveViewSearch;
 
 impl GitCometView {
     /// Runs the built-in or extension command with palette id `command_id`.
@@ -65,6 +65,23 @@ impl GitCometView {
             return;
         }
         match command {
+            Command::KeyboardShortcuts => {
+                if let Some(window) = window {
+                    // Palette selection is still borrowing the palette view.
+                    // Reopen it in help mode after that callback returns.
+                    let handle = window.window_handle();
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(super::command_shortcuts::RunBuiltinCommand {
+                                    id: Command::KeyboardShortcuts.id().to_owned(),
+                                }),
+                                cx,
+                            );
+                        });
+                    });
+                }
+            }
             Command::NewWindow => cx.defer(|cx| cx.dispatch_action(&NewWindow)),
             Command::OpenSettings => cx.defer(crate::view::open_settings_window),
             Command::Quit => cx.defer(crate::app::quit_app_or_warn),

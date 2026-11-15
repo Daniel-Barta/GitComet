@@ -1,4 +1,9 @@
+use super::gitcomet_view::NavKeyFocus;
 use super::*;
+use crate::kit::search_keys::{
+    DiffNextSearchMatchOrChange, DiffPrevSearchMatchOrChange, OpenActiveViewSearch,
+    TextInputDiffNextSearchMatchOrChange, TextInputDiffPrevSearchMatchOrChange,
+};
 use crate::kit::window_chrome::{cursor_style_for_resize_edge, resize_edge};
 
 #[cfg(test)]
@@ -24,14 +29,13 @@ impl Render for GitCometView {
         }
 
         let theme = self.theme;
-        let font_preferences = crate::font_preferences::current(cx);
         debug_assert!(matches!(
             self.view_mode,
             GitCometViewMode::Normal
                 | GitCometViewMode::FocusedMergetool
                 | GitCometViewMode::FocusedDiff
         ));
-        self.sync_sidebar_header_layout(window, cx);
+        self.sync_panel_header_layout(window, cx);
         let next_window_size = window.viewport_size();
         let previous_window_width = self.last_window_size.width;
         let window_width_changed = previous_window_width != next_window_size.width;
@@ -215,6 +219,21 @@ impl Render for GitCometView {
             }
         }
 
+        // A child can open a dialog directly through the popover host. Retract
+        // background cards here too, including any timer armed before it opened.
+        if self.background_hovers_blocked(cx) {
+            self.dismiss_commit_message_hover(cx);
+            if !self.history_refs_hover_host.read(cx).is_item_menu_open() {
+                self.close_history_refs_hover(cx);
+            }
+            if self.command_palette_open || self.reveal_commit_open || self.document_picker_open(cx)
+            {
+                self.tooltip_host.update(cx, |host, cx| {
+                    host.clear_tooltip(cx);
+                });
+            }
+        }
+
         let decorations = window.window_decorations();
         self.sync_frame_decorations(decorations, cx);
         let (tiling, client_inset) = match decorations {
@@ -232,8 +251,6 @@ impl Render for GitCometView {
             .unwrap_or(CursorStyle::Arrow);
 
         let center_content = gate_content.unwrap_or_else(|| self.center_content(window, cx));
-        let font_features =
-            crate::font_preferences::applied_font_features(font_preferences.use_font_ligatures);
         let show_custom_window_chrome =
             crate::linux_gui_env::LinuxGuiEnvironment::should_render_custom_window_chrome(
                 decorations,
@@ -244,18 +261,7 @@ impl Render for GitCometView {
             .flex_col()
             .size_full()
             .text_size(theme.ui_text(16.0))
-            .font(gpui::Font {
-                family: crate::font_preferences::applied_ui_font_family(
-                    &font_preferences.ui_font_family,
-                    cx,
-                )
-                .into(),
-                features: font_features,
-                fallbacks: None,
-                weight: gpui::FontWeight::default(),
-                width: gpui::FontWidth::default(),
-                style: gpui::FontStyle::default(),
-            })
+            .font(crate::font_preferences::current_ui_font(cx))
             .text_color(theme.colors.foreground.primary)
             // Any click anywhere hides visible tooltips (both gpui-managed
             // bubbles and the canvas-driven TooltipHost overlay).
@@ -282,8 +288,8 @@ impl Render for GitCometView {
         {
             let summary = report.summary.clone();
 
-            // A product without an issue tracker offers only Ignore.
-            let report_button = (!report.issue_url.is_empty()).then(|| {
+            // A native review action takes precedence over the issue tracker.
+            let report_button = self.can_report_startup_crash(cx).then(|| {
                 components::Button::new("startup_crash_report_open", "Report Issue")
                     .style(components::ButtonStyle::Filled)
                     .on_click(theme, cx, |this, _e, _w, cx| {
@@ -434,14 +440,23 @@ impl Render for GitCometView {
                 }
             };
 
-            let inline_error = self.auth_prompt_input_error.clone().or_else(|| {
-                (prompt.status == AuthPromptStatus::Rejected).then(|| prompt.reason.clone())
-            });
-            let reason = prompt
-                .challenge
-                .as_ref()
-                .map(|challenge| challenge.prompt.clone())
-                .unwrap_or_else(|| prompt.reason.clone());
+            let inline_error =
+                self.auth_prompt_input_error
+                    .clone()
+                    .or_else(|| match &prompt.status {
+                        AuthPromptStatus::Rejected { message } => Some(message.clone()),
+                        AuthPromptStatus::AwaitingInput | AuthPromptStatus::Validating => None,
+                    });
+            let details = prompt
+                .output
+                .clone()
+                .or_else(|| {
+                    prompt
+                        .challenge
+                        .as_ref()
+                        .map(|challenge| challenge.prompt.clone())
+                })
+                .unwrap_or_default();
 
             let confirm_button = components::Button::new(
                 "auth_prompt_confirm",
@@ -487,17 +502,14 @@ impl Render for GitCometView {
                             .child(error),
                     )
                 })
-                .when(
-                    !reason.trim().is_empty() && prompt.status != AuthPromptStatus::Rejected,
-                    |this| {
-                        this.child(prompt_banner_details(
-                            theme,
-                            ui_scale_percent,
-                            "auth_prompt_reason_scroll",
-                            reason,
-                        ))
-                    },
-                )
+                .when(!details.trim().is_empty(), |this| {
+                    this.child(prompt_banner_details(
+                        theme,
+                        ui_scale_percent,
+                        "auth_prompt_details_scroll",
+                        details,
+                    ))
+                })
                 .child(
                     div()
                         .pt_1()
@@ -576,13 +588,28 @@ impl Render for GitCometView {
                     cx.stop_propagation();
                     return;
                 }
-                let handled = this
-                    .main_pane
-                    .update(cx, |pane, cx| pane.open_search_for_active_view(window, cx));
+                // The search of the pane holding focus; the main slot's
+                // otherwise (History's, or the hosted diff pane of the
+                // extension view or overlay over it).
+                let handled = if this.sidebar_pane.read(cx).contains_focus(window, cx) {
+                    this.sidebar_pane
+                        .update(cx, |pane, cx| pane.open_search(window, cx))
+                } else if this.details_pane.read(cx).contains_focus(window, cx) {
+                    this.details_pane
+                        .update(cx, |pane, cx| pane.open_review_search(window, cx))
+                } else {
+                    false
+                } || this.open_main_slot_search(window, cx);
                 if handled {
                     cx.stop_propagation();
                 }
             }))
+            .on_action(cx.listener(
+                |this, action: &super::command_shortcuts::RunBuiltinCommand, window, cx| {
+                    this.run_builtin_shortcut(&action.id, window, cx);
+                    cx.stop_propagation();
+                },
+            ))
             .on_action(cx.listener(
                 |this, action: &super::extension_host::RunExtensionCommand, _window, cx| {
                     this.run_extension_command(&action.id, cx);
@@ -641,12 +668,26 @@ impl Render for GitCometView {
                     return;
                 }
                 let handled = this.details_pane.update(cx, |pane, cx| {
-                    pane.handle_commit_submit_shortcut(window, cx)
+                    pane.handle_commit_submit_shortcut(false, window, cx)
                 });
                 if handled {
                     cx.stop_propagation();
                 }
             }))
+            .on_action(
+                cx.listener(|this, _: &TextInputCommitAndPushSubmit, window, cx| {
+                    if !this.shell_action_allowed(super::shell_policy::ShellAction::Repository) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    let handled = this.details_pane.update(cx, |pane, cx| {
+                        pane.handle_commit_submit_shortcut(true, window, cx)
+                    });
+                    if handled {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_action(cx.listener(|this, _: &TextInputDiffPrevFile, _window, cx| {
                 if !this.shell_action_allowed(super::shell_policy::ShellAction::Repository) {
                     cx.stop_propagation();
@@ -672,14 +713,22 @@ impl Render for GitCometView {
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(
-                |this, _: &TextInputDiffPrevSearchMatchOrChange, _window, cx| {
-                    this.defer_search_match_navigation(false, cx);
+                |this, _: &TextInputDiffPrevSearchMatchOrChange, window, cx| {
+                    if this.step_focused_pane_search(false, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    this.defer_search_match_navigation(false, NavKeyFocus::TextInput, cx);
                     cx.stop_propagation();
                 },
             ))
             .on_action(cx.listener(
-                |this, _: &TextInputDiffNextSearchMatchOrChange, _window, cx| {
-                    this.defer_search_match_navigation(true, cx);
+                |this, _: &TextInputDiffNextSearchMatchOrChange, window, cx| {
+                    if this.step_focused_pane_search(true, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    this.defer_search_match_navigation(true, NavKeyFocus::TextInput, cx);
                     cx.stop_propagation();
                 },
             ))
@@ -695,6 +744,16 @@ impl Render for GitCometView {
                 this.defer_adjacent_diff_file_navigation(-1, cx);
                 cx.stop_propagation();
             }))
+            .on_action(cx.listener(|this, _: &FocusNextReviewPane, _window, cx| {
+                this.defer_review_cycle(false, cx);
+                cx.stop_propagation();
+            }))
+            .on_action(
+                cx.listener(|this, _: &FocusPreviousReviewPane, _window, cx| {
+                    this.defer_review_cycle(true, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .on_action(cx.listener(|this, _: &DiffNextFile, _window, cx| {
                 if !this.shell_action_allowed(super::shell_policy::ShellAction::Repository) {
                     cx.stop_propagation();
@@ -708,14 +767,22 @@ impl Render for GitCometView {
                 cx.stop_propagation();
             }))
             .on_action(
-                cx.listener(|this, _: &DiffPrevSearchMatchOrChange, _window, cx| {
-                    this.defer_search_match_navigation(false, cx);
+                cx.listener(|this, _: &DiffPrevSearchMatchOrChange, window, cx| {
+                    if this.step_focused_pane_search(false, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    this.defer_search_match_navigation(false, NavKeyFocus::Elsewhere, cx);
                     cx.stop_propagation();
                 }),
             )
             .on_action(
-                cx.listener(|this, _: &DiffNextSearchMatchOrChange, _window, cx| {
-                    this.defer_search_match_navigation(true, cx);
+                cx.listener(|this, _: &DiffNextSearchMatchOrChange, window, cx| {
+                    if this.step_focused_pane_search(true, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    this.defer_search_match_navigation(true, NavKeyFocus::Elsewhere, cx);
                     cx.stop_propagation();
                 }),
             )
@@ -825,11 +892,11 @@ impl Render for GitCometView {
             .top_0()
             .left_0()
             .size_full()
+            .child(stable_overlay_view(self.history_refs_hover_host.clone()))
+            .child(stable_overlay_view(self.commit_message_hover_host.clone()))
             .child(self.command_palette.clone())
             .child(self.document_picker.clone())
             .child(stable_overlay_view(self.reveal_commit_dialog.clone()))
-            .child(stable_overlay_view(self.history_refs_hover_host.clone()))
-            .child(stable_overlay_view(self.commit_message_hover_host.clone()))
             .child(stable_overlay_view(self.popover_host.clone()))
             .child(stable_cached_overlay_view(self.toast_host.clone()))
             .child(stable_overlay_view(self.tooltip_host.clone()));
@@ -876,12 +943,12 @@ impl GitCometView {
         &self,
         theme: AppTheme,
         id: &'static str,
-        handle: PaneResizeHandle,
+        handle: SidePane,
         cx: &gpui::Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let collapsed = match handle {
-            PaneResizeHandle::Sidebar => self.sidebar_collapsed,
-            PaneResizeHandle::Details => self.details_collapsed,
+            SidePane::Sidebar => self.sidebar_collapsed,
+            SidePane::Details => self.details_collapsed,
         };
         if collapsed {
             return div().id(id).w(px(0.0)).h_full();
@@ -890,7 +957,7 @@ impl GitCometView {
         // Only the details divider shows an idle hairline: it separates two
         // regions inside the content card. The sidebar handle sits on the
         // bare canvas and stays invisible until hovered or dragged.
-        let idle_line = matches!(handle, PaneResizeHandle::Details);
+        let idle_line = matches!(handle, SidePane::Details);
         let dragging = self.pane_resize.is_some_and(|state| state.handle == handle);
         div()
             .id(id)
@@ -914,23 +981,18 @@ impl GitCometView {
                     cx.stop_propagation();
                     crate::press_gesture::claim_press(cx);
                     crate::text_selection_owner::preserve(cx);
-                    match handle {
-                        PaneResizeHandle::Sidebar => {
-                            this.sidebar_width_anim_seq =
-                                this.sidebar_width_anim_seq.wrapping_add(1);
-                            this.sidebar_width_animating = false;
-                            this.sidebar_render_width = this.sidebar_width;
-                        }
-                        PaneResizeHandle::Details => {
-                            this.details_width_anim_seq =
-                                this.details_width_anim_seq.wrapping_add(1);
-                            this.details_width_animating = false;
-                            this.details_render_width = this.details_width;
-                        }
-                    }
+                    // A drag cancels any running collapse animation.
+                    let committed = match handle {
+                        SidePane::Sidebar => this.sidebar_width,
+                        SidePane::Details => this.details_width,
+                    };
+                    let (width, anim_seq, animating) = this.side_pane_width_anim(handle);
+                    *anim_seq = anim_seq.wrapping_add(1);
+                    *animating = false;
+                    *width = committed;
                     let minimum = match handle {
-                        PaneResizeHandle::Sidebar => this.sidebar_min_width(),
-                        PaneResizeHandle::Details => this.details_min_width(),
+                        SidePane::Sidebar => this.sidebar_min_width(),
+                        SidePane::Details => this.details_min_width(),
                     };
                     this.pane_resize = Some(
                         PaneResizeState::new(
@@ -951,8 +1013,8 @@ impl GitCometView {
                     cx.notify();
                 }),
             )
-            .on_drag_move(cx.listener(
-                move |this, e: &gpui::DragMoveEvent<PaneResizeHandle>, _w, cx| {
+            .on_drag_move(
+                cx.listener(move |this, e: &gpui::DragMoveEvent<SidePane>, _w, cx| {
                     let Some(state) = this.pane_resize else {
                         return;
                     };
@@ -970,7 +1032,7 @@ impl GitCometView {
                     );
                     let mut changed = false;
                     match state.handle {
-                        PaneResizeHandle::Sidebar => {
+                        SidePane::Sidebar => {
                             if this.sidebar_width != next_width {
                                 this.set_sidebar_width_from_pixels(next_width);
                                 changed = true;
@@ -980,7 +1042,7 @@ impl GitCometView {
                                 changed = true;
                             }
                         }
-                        PaneResizeHandle::Details => {
+                        SidePane::Details => {
                             if this.details_width != next_width {
                                 this.set_details_width_from_pixels(next_width);
                                 changed = true;
@@ -994,8 +1056,8 @@ impl GitCometView {
                     if changed {
                         cx.notify();
                     }
-                },
-            ))
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {

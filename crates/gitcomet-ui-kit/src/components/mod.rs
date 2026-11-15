@@ -13,6 +13,7 @@ mod list_layout;
 mod modal;
 mod navigation;
 mod painted_when;
+mod panel_header;
 mod panel_tab;
 mod picker_prompt;
 mod quick_search_bar;
@@ -36,8 +37,8 @@ pub use crate::interaction::{
 };
 pub use action_button::{ActionAvailability, ActionButton, ActionButtonStyle, ActionRun};
 pub use avatar::{
-    AVATAR_DIAMETER_PX, AVATAR_FONT_PX, author_avatar, author_color, author_initials,
-    initials_paint_origin_y,
+    AVATAR_DIAMETER_PX, AVATAR_FONT_PX, author_avatar, author_avatar_sized, author_color,
+    author_initials, initials_paint_origin_y,
 };
 pub use bottom_bar::{BarButton, bottom_bar, nav_arrow_button};
 pub use button::{Button, ButtonSlot, ButtonStyle, inline_icon_button};
@@ -58,10 +59,9 @@ pub use interactive_row::{InteractiveRowExt, InteractiveRowState, InteractiveRow
 pub use interstitial::{INTERSTITIAL_CARD_MAX_WIDTH_PX, interstitial, interstitial_cta_button};
 pub use list_layout::{ListLayout, list_layout_button};
 pub use modal::{modal_scrim, modal_surface, popover_surface};
-pub use navigation::{
-    BarTab, NavTab, navigation_tab, navigation_tab_metrics, navigation_tab_strip, selectable_field,
-};
+pub use navigation::{BarTab, selectable_field};
 pub use painted_when::{PaintedWhen, painted_when};
+pub use panel_header::{PanelHeader, PanelHeaderMeasure};
 pub use panel_tab::{on_nested_control_click, panel_tab, panel_tab_close, panel_tab_text_color};
 /// Public field type of [`PickerPromptLayout::headers`], carried out of the
 /// private module with it so a caller can name what that field hands them
@@ -76,7 +76,11 @@ pub use picker_prompt::{
     picker_prompt_layout_ordered, picker_row, remove_row_button, row_height as picker_row_height,
     selected_hint_pill,
 };
-pub use quick_search_bar::{QuickSearchBar, QuickSearchStatus, SearchToggles};
+pub use quick_search_bar::{
+    QUICK_SEARCH_CLOSE_TOOLTIP, QUICK_SEARCH_NEXT_MATCH_TOOLTIP, QUICK_SEARCH_PREV_MATCH_TOOLTIP,
+    QuickSearchBar, QuickSearchFeatures, QuickSearchState, QuickSearchStatus, QuickSearchTier,
+    SearchToggles, quick_search_row_height, quick_search_tier_for_width,
+};
 pub use repository_badge::{
     REPOSITORY_BADGE_SIZE_PX, repository_behind_box, repository_behind_box_width,
     repository_initials, repository_initials_box,
@@ -91,8 +95,8 @@ pub use settings_rows::{
     settings_summary_row, settings_summary_row_with_value_prefix, settings_toggle_row,
 };
 pub use shortcut_keys::{
-    Shortcut, alt_shortcut, keystrokes_display, keystrokes_label_for, secondary_shortcut,
-    shortcut_keys, shortcut_keys_compact,
+    Shortcut, alt_shortcut, keystrokes_display, keystrokes_label_for, ordered_shortcut_label,
+    secondary_shortcut, shortcut_keys, shortcut_keys_compact,
 };
 pub use skeleton::skeleton;
 pub use split_button::{SplitButton, SplitButtonStyle, filled_action_frame};

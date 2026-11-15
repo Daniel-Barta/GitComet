@@ -569,7 +569,7 @@ impl DiffRenderer {
         self.mark_conflict_resolved_output_saved(cx);
     }
 
-    /// Footer bar for the text conflict resolver (section 30): live resolution
+    /// Footer bar for the text conflict resolver: live resolution
     /// status line plus the leftover-marker indicator. The saves live in the
     /// bottom bar; merge abort lives in the action bar's "Abort merge" button.
     fn conflict_resolver_footer(
@@ -962,7 +962,7 @@ impl DiffRenderer {
                             };
                             let handle_w = scaled_px(PANE_RESIZE_HANDLE_PX);
                             let min_col_w = scaled_px(DIFF_SPLIT_COL_MIN_PX);
-                            let main_w = (self.main_pane_content_width(cx)
+                            let main_w = (self.main_pane_content_width()
                                 - scrollbar_gutter
                                 - minimap_w)
                                 .max(px(0.0));
@@ -1062,7 +1062,7 @@ impl DiffRenderer {
                                                     px(0.0)
                                                 };
                                                 let main_w =
-                                                    (this.main_pane_content_width(cx)
+                                                    (this.main_pane_content_width()
                                                         - scrollbar_gutter)
                                                         .max(px(0.0));
                                                 let avail = (main_w - handle_w * 2.0).max(px(0.0));
@@ -1993,7 +1993,7 @@ impl DiffRenderer {
                                 })
                                 .child(output_header)
                                 .when_some(autosolve_summary, |d, summary| {
-                                    // section 30: make the autosolve pass visible on
+                                    // Make the autosolve pass visible on
                                     // open — accent chip, not a muted footnote.
                                     d.child(
                                         div()
@@ -2341,7 +2341,7 @@ impl DiffRenderer {
                                     bottom_section
                                 })
                                 .child(self.conflict_resolver_footer(theme, has_current, cx))
-                                // section 30 split: ends a row-drag on mouse-up anywhere.
+                                // Split: ends a row-drag on mouse-up anywhere.
                                 .child(ConflictRowSelectionTracker { view: cx.entity() })
                                 .into_any_element()
                             }
@@ -2691,6 +2691,7 @@ impl DiffRenderer {
                     change_extents: None,
                     tasks_editable: false,
                     disclosures: None,
+                    flush_left: false,
                 };
                 let vertical_scrollbar_gutter = if vertical_sync_enabled {
                     px(0.0)

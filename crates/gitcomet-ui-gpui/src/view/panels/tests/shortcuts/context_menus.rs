@@ -73,6 +73,111 @@ fn context_menu_model_for(
     })
 }
 
+/// The example's branch and commit menu entry: in local and remote branch
+/// menus and in commit menus, after the comparison entries, and run with
+/// what the menu was opened on.
+#[gpui::test]
+fn extension_ref_menu_entries_run_with_the_menus_target(cx: &mut gpui::TestAppContext) {
+    use gitcomet_extension_api::{RefMenuTarget, Registry};
+    use gitcomet_extension_example::review;
+    cx.update(|app| {
+        crate::view::extension_host::install(
+            Registry::build(vec![Box::new(review::ReviewExtension)]).unwrap(),
+            app,
+        );
+    });
+    let (store, events) = AppStore::new_test(Arc::new(TestBackend));
+    let (view, cx) =
+        cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
+    let repo_id = RepoId(70547);
+    let commit_id = CommitId("cafebabe00000000".into());
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_ref_menu_entries",
+        std::process::id()
+    ));
+    apply_state(
+        cx,
+        &view,
+        app_state_with_active_repo(shortcut_fixture_repo(repo_id, &workdir, &commit_id)),
+    );
+    cx.run_until_parked();
+
+    let cases = [
+        (
+            PopoverKind::BranchMenu {
+                repo_id,
+                target: BranchMenuTarget::local("feature"),
+            },
+            RefMenuTarget::LocalBranch {
+                name: "feature".into(),
+            },
+            "Focus",
+        ),
+        (
+            PopoverKind::BranchMenu {
+                repo_id,
+                target: BranchMenuTarget::remote("origin", "feature"),
+            },
+            RefMenuTarget::RemoteBranch {
+                remote: "origin".into(),
+                branch: "feature".into(),
+            },
+            "Focus",
+        ),
+        (
+            PopoverKind::CommitMenu {
+                repo_id,
+                commit_id: commit_id.clone(),
+                refs: CommitMenuRefs::All,
+            },
+            RefMenuTarget::Commit {
+                id: commit_id.clone(),
+            },
+            "Export patch…",
+        ),
+    ];
+    for (kind, expected, next) in cases {
+        let model = cx.update(|_window, app| context_menu_model_for(&view, app, kind.clone()));
+        let labels: Vec<&str> = model.entry_labels().into_iter().collect();
+        let at = labels
+            .iter()
+            .position(|label| *label == "Mark reviewed here")
+            .unwrap_or_else(|| panic!("no extension entry in {kind:?}: {labels:?}"));
+        assert_eq!(
+            labels.get(at + 1),
+            Some(&next),
+            "the entry closes the view-shaping entries in {kind:?}"
+        );
+        let action = model
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ContextMenuItem::Entry { label, action, .. }
+                    if label.as_ref() == "Mark reviewed here" =>
+                {
+                    Some(action.as_ref().clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        cx.update(|window, app| {
+            let popover = view.read(app).popover_host.clone();
+            popover.update(app, |host, cx| {
+                host.context_menu_activate_action(action, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        let last = cx.update(|_window, app| {
+            review::reviews(app)
+                .read(app)
+                .reviewed_refs()
+                .last()
+                .cloned()
+        });
+        assert_eq!(last, Some((workdir.clone(), expected)));
+    }
+}
+
 #[gpui::test]
 fn snapshot_diff_selection_copies_without_repository_menu_actions(cx: &mut gpui::TestAppContext) {
     use gitcomet_extension_api::{DiffLayout, DiffPaneOptions, DiffSnapshot, Registry};
@@ -876,7 +981,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     assert_shortcut_action!(
         commit_model,
         "C",
-        ContextMenuAction::CopyText { text } if text == commit_id.as_ref()
+        ContextMenuAction::CopyCommitSha { commit_id: copied } if copied == &commit_id
     );
     assert_shortcut_action!(
         commit_model,
@@ -1000,7 +1105,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     });
     assert_declared_shortcuts(
         &unstaged_status_model,
-        &[&sec("H"), &sec("S"), &sec("D"), &sec("Shift+C")],
+        &[&sec("H"), &sec("S"), &sec("U"), &sec("Shift+C")],
     );
     assert_shortcut_action!(
         unstaged_status_model,
@@ -1024,7 +1129,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     );
     assert_shortcut_action!(
         unstaged_status_model,
-        &sec("D"),
+        &sec("U"),
         ContextMenuAction::DiscardWorktreeChangesSelectionOrPath {
             repo_id: rid,
             area,
@@ -1050,7 +1155,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     });
     assert_declared_shortcuts(
         &staged_status_model,
-        &[&sec("H"), &sec("U"), &sec("D"), &sec("Shift+C")],
+        &[&sec("H"), &sec("U"), &sec("Shift+C")],
     );
     assert_shortcut_action!(
         staged_status_model,
@@ -1072,15 +1177,12 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
             path
         } if *rid == repo_id && *area == DiffArea::Staged && path == &staged_path
     );
-    assert_shortcut_action!(
-        staged_status_model,
-        &sec("D"),
-        ContextMenuAction::DiscardWorktreeChangesSelectionOrPath {
-            repo_id: rid,
-            area,
-            path
-        } if *rid == repo_id && *area == DiffArea::Staged && path == &staged_path
-    );
+    // Ctrl/Cmd+U is Unstage here, so the staged menu offers no Discard.
+    assert!(!staged_status_model.items.iter().any(|item| matches!(
+        item,
+        ContextMenuItem::Entry { action, .. }
+            if matches!(**action, ContextMenuAction::DiscardWorktreeChangesSelectionOrPath { .. })
+    )));
     assert_shortcut_action!(
         staged_status_model,
         &sec("Shift+C"),
@@ -1100,7 +1202,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     });
     assert_declared_shortcuts(
         &conflicted_status_model,
-        &[&sec("H"), &sec("O"), &sec("T"), &sec("D"), &sec("Shift+C")],
+        &[&sec("H"), &sec("O"), &sec("T"), &sec("U"), &sec("Shift+C")],
     );
     assert_shortcut_action!(
         conflicted_status_model,
@@ -1141,7 +1243,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     );
     assert_shortcut_action!(
         conflicted_status_model,
-        &sec("D"),
+        &sec("U"),
         ContextMenuAction::DiscardWorktreeChangesSelectionOrPath {
             repo_id: rid,
             area,
@@ -1170,7 +1272,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
             },
         )
     });
-    assert_declared_shortcuts(&conflict_menu_model, &[&sec("O"), &sec("T"), &sec("D")]);
+    assert_declared_shortcuts(&conflict_menu_model, &[&sec("O"), &sec("T"), &sec("U")]);
     assert_shortcut_action!(
         conflict_menu_model,
         &sec("O"),
@@ -1185,7 +1287,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     );
     assert_shortcut_action!(
         conflict_menu_model,
-        &sec("D"),
+        &sec("U"),
         ContextMenuAction::DiscardWorktreeChangesSelectionOrPath { area, path, .. }
             if *area == DiffArea::Unstaged && path == &conflicted_path
     );
@@ -1195,6 +1297,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
             &view,
             app,
             PopoverKind::DiffEditorMenu {
+                context_actions: Vec::new(),
                 repo_id: Some(repo_id),
                 area: DiffArea::Unstaged,
                 path: Some(unstaged_path.clone()),
@@ -1208,7 +1311,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
             },
         )
     });
-    assert_declared_shortcuts(&diff_editor_unstaged_model, &["S", "D", "C"]);
+    assert_declared_shortcuts(&diff_editor_unstaged_model, &["S", "U", "C"]);
     assert_shortcut_action!(
         diff_editor_unstaged_model,
         "S",
@@ -1220,7 +1323,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     );
     assert_shortcut_action!(
         diff_editor_unstaged_model,
-        "D",
+        "U",
         ContextMenuAction::ApplyWorktreePatch {
             repo_id: rid,
             patch,
@@ -1238,6 +1341,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
             &view,
             app,
             PopoverKind::DiffEditorMenu {
+                context_actions: Vec::new(),
                 repo_id: Some(repo_id),
                 area: DiffArea::Staged,
                 path: Some(staged_path.clone()),
@@ -1270,7 +1374,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     let diff_hunk_unstaged_model = cx.update(|_window, app| {
         context_menu_model_for(&view, app, PopoverKind::DiffHunkMenu { repo_id, src_ix: 3 })
     });
-    assert_declared_shortcuts(&diff_hunk_unstaged_model, &[&sec("S"), &sec("D")]);
+    assert_declared_shortcuts(&diff_hunk_unstaged_model, &[&sec("S"), &sec("U")]);
     assert_shortcut_action!(
         diff_hunk_unstaged_model,
         &sec("S"),
@@ -1281,7 +1385,7 @@ fn file_and_diff_context_menu_shortcuts_match_expected_actions(cx: &mut gpui::Te
     );
     assert_shortcut_action!(
         diff_hunk_unstaged_model,
-        &sec("D"),
+        &sec("U"),
         ContextMenuAction::ApplyWorktreePatch {
             repo_id: rid,
             patch,

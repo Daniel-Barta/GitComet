@@ -169,6 +169,9 @@ pub struct HistoryState {
     /// The worktree moved again while a load was in flight; re-run once it
     /// lands, so the list still ends up describing the final state.
     pub range_files_refresh_queued: bool,
+    /// Stops the outstanding range-file load once a newer one or leaving the
+    /// comparison makes its reply unread.
+    pub(crate) range_files_cancellation: gitcomet_core::services::CancellationToken,
     pub squash_preview: Loadable<SquashPreview>,
     pub squash_preview_rev: u64,
     /// The `(oldest, head)` range whose message preview is currently being
@@ -312,6 +315,7 @@ impl Default for HistoryState {
             range_files_request: 0,
             range_files_in_flight: false,
             range_files_refresh_queued: false,
+            range_files_cancellation: Default::default(),
             squash_preview: Loadable::NotLoaded,
             squash_preview_rev: 0,
             squash_preview_pending: None,
@@ -324,22 +328,17 @@ impl Default for HistoryState {
 /// Multi-selected commits in the history view. `commits` always mirrors the
 /// selection (a plain single-select stores one id here); only `len() > 1`
 /// switches the UI into multi-selection presentation. The anchor is the
-/// origin for shift-click ranges and compare pairs; `anchor_index`/
-/// `anchor_log_rev` are a resolution hint trusted only while the log revision
-/// is unchanged.
+/// origin for shift-click ranges; `anchor_index`/`anchor_log_rev` are a
+/// resolution hint trusted only while the log revision is unchanged.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CommitMultiSelection {
     pub commits: Arc<Vec<CommitId>>,
     pub anchor: Option<CommitId>,
     pub anchor_index: Option<usize>,
     pub anchor_log_rev: Option<u64>,
-    /// `commits` is a Ctrl/Cmd+Shift-click pair, `[anchor, clicked]`, compared
-    /// directly rather than as the merged diff of the selection.
-    pub compare_pair: bool,
-    /// The working tree (History's "Uncommitted changes" row) is part of a
-    /// Ctrl/Cmd+Shift-click pair: the one commit in `commits` is compared
-    /// against it. Without an `anchor` the working tree is the anchor, so
-    /// further Ctrl/Cmd+Shift-clicks pair other commits with it.
+    /// The working tree (History's "Uncommitted changes" row) is paired by a
+    /// Ctrl/Cmd+Shift-click: the one commit in `commits`, if any, is compared
+    /// against it, and further Ctrl/Cmd+Shift-clicks pair other commits with it.
     pub working_tree: bool,
 }
 
@@ -359,8 +358,8 @@ impl CommitMultiSelection {
 
     /// A Ctrl/Cmd+Shift-click on the "Uncommitted changes" row: the anchor
     /// commit, or else `selected`, paired with the working tree. The anchor
-    /// stays put, as it does for a pair of commits. `None` without a commit to
-    /// pair, when the click selects the row like a plain one.
+    /// stays put. `None` without a commit to pair, when the click selects the
+    /// row like a plain one.
     pub fn pair_with_working_tree(&self, selected: Option<&CommitId>) -> Option<Self> {
         let commit = self.anchor.as_ref().or(selected)?.clone();
         Some(Self {
@@ -368,7 +367,6 @@ impl CommitMultiSelection {
             anchor: Some(commit),
             anchor_index: self.anchor_index.filter(|_| self.anchor.is_some()),
             anchor_log_rev: self.anchor_log_rev.filter(|_| self.anchor.is_some()),
-            compare_pair: false,
             working_tree: true,
         })
     }
@@ -394,7 +392,6 @@ impl CommitMultiSelection {
                 commit_id
             }
             crate::msg::CommitSelectMode::Toggle => {
-                sel.compare_pair = false;
                 sel.working_tree = false;
                 if let Some(ix) = sel.commits.iter().position(|c| *c == commit_id) {
                     Arc::make_mut(&mut sel.commits).remove(ix);
@@ -445,7 +442,6 @@ impl CommitMultiSelection {
                         } else {
                             entries[a..=b].to_vec()
                         });
-                        sel.compare_pair = false;
                         sel.working_tree = false;
                         if sel.anchor.is_none() {
                             sel.anchor = Some(commit_id.clone());
@@ -457,27 +453,11 @@ impl CommitMultiSelection {
                 commit_id
             }
             crate::msg::CommitSelectMode::Compare => {
-                // The anchor stays put, so further Ctrl/Cmd+Shift-clicks compare
-                // it against other commits. Without a second commit there is
-                // nothing to compare: act like a plain click.
-                if sel.working_tree && sel.anchor.is_none() {
-                    // The working tree is the anchor: pair the commit with it.
-                    sel.commits = Arc::new(vec![commit_id.clone()]);
-                    return (sel, Some(commit_id));
-                }
-                match sel.anchor.clone().filter(|anchor| *anchor != commit_id) {
-                    Some(anchor) => {
-                        sel.commits = Arc::new(vec![anchor, commit_id.clone()]);
-                        sel.compare_pair = true;
-                        sel.working_tree = false;
-                    }
-                    None => collapse_multi_selection_to(
-                        &mut sel,
-                        commit_id.clone(),
-                        clicked_index,
-                        log_rev,
-                    ),
-                }
+                // Pairs the commit with the working tree while that is paired
+                // or selected; otherwise a plain click.
+                let working_tree = sel.working_tree;
+                collapse_multi_selection_to(&mut sel, commit_id.clone(), clicked_index, log_rev);
+                sel.working_tree = working_tree;
                 commit_id
             }
             crate::msg::CommitSelectMode::PreserveIfSelected => {
@@ -510,7 +490,6 @@ fn collapse_multi_selection_to(
     sel.anchor = Some(commit_id);
     sel.anchor_index = clicked_index;
     sel.anchor_log_rev = Some(log_rev);
-    sel.compare_pair = false;
     sel.working_tree = false;
 }
 
@@ -524,6 +503,13 @@ fn commit_selection_entry_index(
     index_hint
         .filter(|&ix| entries.get(ix) == Some(target))
         .or_else(|| entries.iter().position(|id| id == target))
+}
+
+/// A claimed range-file load: the id its reply carries, and what stops it.
+#[derive(Clone, Debug)]
+pub struct RangeFilesLoad {
+    pub request: u64,
+    pub cancellation: gitcomet_core::services::CancellationToken,
 }
 
 /// A "compare two points" selection. `from` is the base/older side and `to`
@@ -542,6 +528,23 @@ pub struct RangeSelection {
     /// The commit the loaded list was measured from: the merge base of a
     /// merge-base comparison. `None` until the list loads.
     pub base: Option<CommitId>,
+    pub source: ComparisonSource,
+}
+
+/// What started a comparison, which decides whether the history multi-selection
+/// describes it and how the UI names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComparisonSource {
+    /// Consecutive selected commits: `from` is the oldest one's parent, so the
+    /// diff is their combined changes.
+    MergedSelection,
+    /// Exactly two selected commits that are not consecutive: the direct diff
+    /// between them, older (lower in the log) to newer. So is a commit paired
+    /// with the working tree by Ctrl/Cmd+Shift-click (`to` of `None`).
+    SelectedPair,
+    /// Mark/compare, a branch, a tag, or the working tree. Any multi-selection
+    /// left over from earlier clicks describes something else and is dropped.
+    Explicit,
 }
 
 impl RangeSelection {
@@ -562,6 +565,17 @@ impl RangeSelection {
             to_label,
             options: Default::default(),
             base: None,
+            source: ComparisonSource::Explicit,
+        }
+    }
+
+    /// [`Self::same_comparison`] over optional comparisons: both absent, or the
+    /// same request. What started one and its loaded base do not count.
+    pub fn same_optional(a: Option<&Self>, b: Option<&Self>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => a.same_comparison(b),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
         }
     }
 
@@ -838,34 +852,67 @@ impl RepoState {
             self.history_state.selected_commit_rev.wrapping_add(1);
     }
 
-    /// Leave comparison mode: drop the endpoints and the file list, and retire
-    /// any load still in flight so its reply cannot repopulate the list of a
-    /// comparison the user has already left. Returns whether there was anything
-    /// to leave — a plain commit click runs through here on every selection, and
-    /// bumping the revs for a comparison that was never active would invalidate
-    /// the range-file row cache for nothing.
+    /// Leave comparison mode: drop the endpoints and the file list, close a file
+    /// diff opened from it, and retire any load still in flight so its reply
+    /// cannot repopulate the list of a comparison the user has already left.
+    /// Returns whether there was anything to leave — a plain commit click runs
+    /// through here on every selection, and bumping the revs for a comparison
+    /// that was never active would invalidate the range-file row cache for
+    /// nothing.
     pub(crate) fn clear_range_comparison(&mut self) -> bool {
         if self.history_state.range_selection.is_none() && !self.history_state.range_files_in_flight
         {
             return false;
         }
         self.set_range_selection(None);
+        self.release_range_files();
+        // Only a comparison opens range diffs, so one open is this comparison's,
+        // as is an editor's way back to one.
+        let is_range = |target: &gitcomet_core::domain::DiffTarget| {
+            matches!(
+                target,
+                gitcomet_core::domain::DiffTarget::CommitRange { .. }
+            )
+        };
+        if self.diff_state.diff_target.as_ref().is_some_and(is_range) {
+            self.close_diff();
+        }
+        if self
+            .diff_state
+            .edit_return_view
+            .as_ref()
+            .is_some_and(|view| is_range(&view.target))
+        {
+            self.diff_state.edit_return_view = None;
+        }
+        true
+    }
+
+    /// Drop the comparison's file list and retire any load still in flight,
+    /// keeping its endpoints so the list can be loaded again.
+    pub(crate) fn release_range_files(&mut self) {
         self.set_range_files(Loadable::NotLoaded);
         self.history_state.range_files_request =
             self.history_state.range_files_request.wrapping_add(1);
         self.history_state.range_files_in_flight = false;
         self.history_state.range_files_refresh_queued = false;
-        true
+        self.history_state.range_files_cancellation.cancel();
     }
 
     /// Claim the next range-file load. Returns the request id to carry through
     /// the effect and back on the reply; anything older is stale by definition.
-    pub(crate) fn begin_range_files_load(&mut self) -> u64 {
+    pub(crate) fn begin_range_files_load(&mut self) -> RangeFilesLoad {
         self.history_state.range_files_request =
             self.history_state.range_files_request.wrapping_add(1);
         self.history_state.range_files_in_flight = true;
         self.history_state.range_files_refresh_queued = false;
-        self.history_state.range_files_request
+        self.history_state.range_files_cancellation.cancel();
+        self.history_state.range_files_cancellation =
+            gitcomet_core::services::CancellationToken::new();
+        RangeFilesLoad {
+            request: self.history_state.range_files_request,
+            cancellation: self.history_state.range_files_cancellation.clone(),
+        }
     }
 
     /// Raise a refresh of the current comparison's file list. `Some(request)`
@@ -876,7 +923,7 @@ impl RepoState {
     /// refresh but forgot to claim would leave `range_files_in_flight` false
     /// forever, and every later change would start its own pair of full-tree
     /// `git diff` calls.
-    pub(crate) fn request_range_files_refresh(&mut self) -> Option<u64> {
+    pub(crate) fn request_range_files_refresh(&mut self) -> Option<RangeFilesLoad> {
         if self.history_state.range_files_in_flight {
             self.history_state.range_files_refresh_queued = true;
             return None;

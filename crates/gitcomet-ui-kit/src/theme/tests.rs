@@ -1542,6 +1542,13 @@ fn readability_checks(theme: AppTheme) -> Vec<ReadabilityCheck> {
             colors.editor.line_number,
             editor,
         ),
+        // Collapsed hunk separators draw placeholder text on the bare editor.
+        (
+            "placeholder/editor",
+            "colors.foreground.placeholder",
+            colors.foreground.placeholder,
+            editor,
+        ),
         (
             "line_number/gutter",
             "colors.editor.line_number",
@@ -2114,20 +2121,6 @@ fn runtime_themes_are_reused_until_the_directory_changes() {
     assert_eq!(reloaded["custom_theme"].option.label, "Second edit");
 }
 
-#[test]
-fn runtime_theme_dir_ignores_reserved_system_theme_filenames() {
-    let dir = tempdir().expect("temp dir should exist");
-    fs::write(dir.path().join("gitcomet.json"), "not parsed")
-        .expect("reserved theme file should be written");
-
-    let themes = merged_theme_options(Some(dir.path()));
-
-    assert_eq!(
-        themes,
-        available_themes(),
-        "custom themes in reserved bundled filenames should be ignored"
-    );
-}
 #[test]
 fn runtime_theme_dir_ignores_every_reserved_system_theme_filename() {
     let dir = tempdir().expect("temp dir should exist");

@@ -535,6 +535,55 @@ fn session_update_effects_persist_on_session_executor() {
 }
 
 #[test]
+fn safe_push_after_commit_without_backend_reports_completion() {
+    let executor = super::super::executor::TaskExecutor::new(1);
+    let backend: Arc<dyn GitBackend> = Arc::new(PanicOpenBackend);
+    let mut repos = RepositoryRuntimes::default();
+    let repo_id = RepoId(3);
+    let (msg_tx, msg_rx) = std::sync::mpsc::channel::<Msg>();
+    let context = gitcomet_core::services::SafePushAfterCommitContext {
+        amend: false,
+        local_branch: Some("main".into()),
+        pre_head: None,
+        post_head: None,
+        hooks: gitcomet_core::services::GitHooks::Run,
+    };
+    schedule_effect_for_test(
+        &executor,
+        &executor,
+        &backend,
+        &mut repos,
+        msg_tx,
+        Effect::RepoCommand(RepoCommandEffect::SafePushAfterCommit {
+            repo_id,
+            context: context.clone(),
+            auth: None,
+        }),
+    );
+    match msg_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("missing backend still completes")
+    {
+        Msg::Internal(crate::msg::InternalMsg::SafePushAfterCommitFinished {
+            repo_id: actual_id,
+            context: actual_context,
+            result,
+            ..
+        }) => {
+            assert_eq!(actual_id, repo_id);
+            assert_eq!(actual_context, context);
+            assert!(
+                result
+                    .expect_err("missing backend")
+                    .to_string()
+                    .contains("Repository handle not found")
+            );
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+}
+
+#[test]
 fn safe_push_after_commit_effect_carries_auth_to_finished_message() {
     let executor = super::super::executor::TaskExecutor::new(1);
     let backend: Arc<dyn GitBackend> = Arc::new(PanicOpenBackend);
@@ -556,6 +605,7 @@ fn safe_push_after_commit_effect_carries_auth_to_finished_message() {
         local_branch: Some("main".to_string()),
         pre_head: None,
         post_head: Some(CommitId("2222222222222222222222222222222222222222".into())),
+        hooks: gitcomet_core::services::GitHooks::Run,
     };
     let auth = gitcomet_core::auth::StagedGitAuth {
         challenge: None,
@@ -606,15 +656,8 @@ fn clone_repo_effect_clones_local_repo_and_emits_finished_and_open_repo() {
         }
     }
 
-    let base = std::env::temp_dir().join(format!(
-        "gitcomet-clone-effect-test-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&base);
+    let base_guard = tempfile::tempdir().expect("create tempdir");
+    let base = base_guard.path().to_path_buf();
 
     let src = base.join("src");
     let dest = base.join("dest");
@@ -852,9 +895,6 @@ fn save_worktree_file_effect_writes_and_can_stage() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -881,7 +921,10 @@ fn save_worktree_file_effect_writes_and_can_stage() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -890,7 +933,7 @@ fn save_worktree_file_effect_writes_and_can_stage() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -898,15 +941,8 @@ fn save_worktree_file_effect_writes_and_can_stage() {
         }
     }
 
-    let base = std::env::temp_dir().join(format!(
-        "gitcomet-save-worktree-file-test-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&base);
+    let base_guard = tempfile::tempdir().expect("create tempdir");
+    let base = base_guard.path().to_path_buf();
 
     let rel = PathBuf::from("dir/out.txt");
     std::fs::create_dir(base.join("dir")).unwrap();
@@ -1123,9 +1159,6 @@ fn append_gitignore_patterns_effect_creates_appends_and_dedupes() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -1148,7 +1181,10 @@ fn append_gitignore_patterns_effect_creates_appends_and_dedupes() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -1157,7 +1193,7 @@ fn append_gitignore_patterns_effect_creates_appends_and_dedupes() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -1347,9 +1383,6 @@ fn checkout_conflict_base_effect_calls_repo_and_emits_finished() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -1372,7 +1405,10 @@ fn checkout_conflict_base_effect_calls_repo_and_emits_finished() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -1381,7 +1417,7 @@ fn checkout_conflict_base_effect_calls_repo_and_emits_finished() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -1536,9 +1572,6 @@ fn accept_conflict_deletion_effect_calls_repo_and_emits_finished() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -1561,7 +1594,10 @@ fn accept_conflict_deletion_effect_calls_repo_and_emits_finished() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -1570,7 +1606,7 @@ fn accept_conflict_deletion_effect_calls_repo_and_emits_finished() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -1728,9 +1764,6 @@ fn load_stashes_effect_truncates_results_to_limit() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -1756,7 +1789,10 @@ fn load_stashes_effect_truncates_results_to_limit() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -1765,7 +1801,7 @@ fn load_stashes_effect_truncates_results_to_limit() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -1773,15 +1809,8 @@ fn load_stashes_effect_truncates_results_to_limit() {
         }
     }
 
-    let base = std::env::temp_dir().join(format!(
-        "gitcomet-stash-load-test-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&base);
+    let base_guard = tempfile::tempdir().expect("create tempdir");
+    let base = base_guard.path().to_path_buf();
 
     let stashes = (0..5)
         .map(|i| StashEntry {
@@ -1924,9 +1953,6 @@ fn stash_effect_requests_stash_reload_on_success() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, message: &str, include_untracked: bool) -> Result<()> {
             self.calls.lock().unwrap().push(format!(
                 "stash {message} include_untracked={include_untracked}"
@@ -1953,7 +1979,10 @@ fn stash_effect_requests_stash_reload_on_success() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -1962,7 +1991,7 @@ fn stash_effect_requests_stash_reload_on_success() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -2120,9 +2149,6 @@ fn pop_stash_effect_applies_and_drops_then_requests_stash_reload() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -2148,7 +2174,10 @@ fn pop_stash_effect_applies_and_drops_then_requests_stash_reload() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -2157,7 +2186,7 @@ fn pop_stash_effect_applies_and_drops_then_requests_stash_reload() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -2314,9 +2343,6 @@ fn pop_stash_effect_propagates_apply_error_without_drop_or_reload() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -2342,7 +2368,10 @@ fn pop_stash_effect_propagates_apply_error_without_drop_or_reload() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -2351,7 +2380,7 @@ fn pop_stash_effect_propagates_apply_error_without_drop_or_reload() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -2507,9 +2536,6 @@ fn drop_stash_effect_requests_stash_reload_on_success() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -2534,7 +2560,10 @@ fn drop_stash_effect_requests_stash_reload_on_success() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -2543,7 +2572,7 @@ fn drop_stash_effect_requests_stash_reload_on_success() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -2697,9 +2726,6 @@ fn drop_stash_effect_requests_stash_reload_on_error() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -2724,7 +2750,10 @@ fn drop_stash_effect_requests_stash_reload_on_error() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -2733,7 +2762,7 @@ fn drop_stash_effect_requests_stash_reload_on_error() {
         fn pull(&self, _mode: PullMode) -> Result<gitcomet_core::services::CommandOutput> {
             unimplemented!()
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
@@ -3857,9 +3886,6 @@ fn pull_releases_the_object_store_before_its_refresh() {
         fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
             unimplemented!()
         }
-        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
-            unimplemented!()
-        }
         fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
             unimplemented!()
         }
@@ -3882,7 +3908,10 @@ fn pull_releases_the_object_store_before_its_refresh() {
         fn unstage(&self, _paths: &[&Path]) -> Result<()> {
             unimplemented!()
         }
-        fn commit(&self, _message: &str) -> Result<()> {
+        fn commit_with_outcome(
+            &self,
+            _message: &str,
+        ) -> Result<gitcomet_core::services::CommitOperationOutcome> {
             unimplemented!()
         }
         fn fetch_all(&self, _prune: bool) -> Result<gitcomet_core::services::CommandOutput> {
@@ -3895,7 +3924,7 @@ fn pull_releases_the_object_store_before_its_refresh() {
             };
             result.map(|()| gitcomet_core::services::CommandOutput::empty_success("git pull"))
         }
-        fn push(&self) -> Result<()> {
+        fn push_with_output(&self) -> Result<CommandOutput> {
             unimplemented!()
         }
         fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {

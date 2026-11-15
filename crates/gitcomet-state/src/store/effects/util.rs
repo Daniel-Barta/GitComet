@@ -1,6 +1,7 @@
 use crate::model::GitOperationOuterOutcome;
 use crate::msg::{InternalMsg, Msg};
 use crate::store::repository_runtime::RepositoryRuntimes;
+use gitcomet_core::auth::{ScopedStagedGitAuth, StagedGitAuth};
 use gitcomet_core::error::{Error, ErrorKind, GitFailureId};
 use gitcomet_core::git_operation::{self, GitOperationContext, GitOperationScope};
 use gitcomet_core::services::GitRepository;
@@ -11,6 +12,15 @@ use std::time::{Instant, SystemTime};
 use super::super::{
     RepoId, executor::TaskExecutor, repo_load_trace, worker_channel::StoreWorkerSender,
 };
+
+/// Runs `run` with `auth` staged; the guard clears it on success, error and panic.
+pub(super) fn run_with_git_auth<R>(
+    auth: Option<StagedGitAuth>,
+    run: impl FnOnce() -> Result<R, Error>,
+) -> Result<R, Error> {
+    let _scoped = auth.map(ScopedStagedGitAuth::stage);
+    run()
+}
 
 pub(super) fn missing_repo_error(repo_id: RepoId) -> Error {
     Error::new(ErrorKind::Backend(format!(
@@ -47,6 +57,10 @@ pub(super) fn single_line_context(value: impl AsRef<str>) -> Option<String> {
     let trimmed = normalized.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
+
+/// Appended to a commit's or push's activity context when it runs with
+/// `--no-verify`.
+pub(super) const SKIPPING_HOOKS_CONTEXT: &str = "skipping Git hooks";
 
 pub(super) fn message_subject(message: &str) -> Option<String> {
     message
