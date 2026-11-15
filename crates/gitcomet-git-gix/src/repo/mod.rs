@@ -1194,13 +1194,13 @@ impl GitRepository for GixRepo {
     fn merge_ref_with_output(&self, reference: &str) -> Result<CommandOutput> {
         let _operation = self.operation_lease()?;
         self.require_working_tree()?;
-        self.merge_ref_with_output_impl(reference, "--ff")
+        self.merge_ref_with_output_impl(reference)
     }
 
     fn merge_ref_no_ff_with_output(&self, reference: &str) -> Result<CommandOutput> {
         let _operation = self.operation_lease()?;
         self.require_working_tree()?;
-        self.merge_ref_with_output_impl(reference, "--no-ff")
+        self.merge_ref_with_ff_flag_impl(reference, "--no-ff")
     }
 
     fn squash_ref_with_output(&self, reference: &str) -> Result<CommandOutput> {

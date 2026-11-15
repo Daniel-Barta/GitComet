@@ -593,10 +593,6 @@ pub(super) fn reduce_prepared(
             request_id,
             ..
         }
-        | Msg::CompareAnchorWithWorkingTree {
-            repo_id,
-            request_id,
-        }
         | Msg::IndexedHistory(crate::indexed_history::IndexedHistoryMsg::Select {
             repo_id,
             request_id,
@@ -1163,9 +1159,6 @@ fn reduce_inner(
         Msg::ClearCommitSelection { repo_id, .. } => {
             effects::clear_commit_selection(state, repo_id)
         }
-        Msg::CompareAnchorWithWorkingTree { repo_id, .. } => {
-            effects::compare_anchor_with_working_tree(state, repo_id)
-        }
         Msg::CompareCommitRange {
             repo_id,
             from,
@@ -1191,7 +1184,7 @@ fn reduce_inner(
             from,
             None,
             from_label,
-            effects::WORKING_TREE_LABEL.to_string(),
+            "Working tree".to_string(),
             ComparisonSource::Explicit,
         ),
         Msg::CompareWithOptions {

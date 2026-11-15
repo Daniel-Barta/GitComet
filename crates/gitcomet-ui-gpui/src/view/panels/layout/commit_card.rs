@@ -25,46 +25,47 @@ const CHIP_DIVIDER_PX: f32 = 1.0;
 const CHIP_CHEVRON_PAD_X: gpui::Rems = gpui::rems(0.25);
 const CHIP_CHEVRON_ICON_PX: f32 = 12.0;
 
-/// The card's SHA chips: the commit's own, then one per parent. A click copies
-/// the commit's own SHA but reveals a parent; every chevron opens the same
-/// commit menu.
+/// The card's two SHA chips. A click copies the commit's own SHA but reveals
+/// the parent; both chevrons open the same commit menu.
 #[derive(Clone, Copy)]
 enum ShaChip {
     /// Washed when the history find query matched the SHA.
-    Commit { find_matched: bool },
-    /// Git's parent number: `1` for the first parent, `2` on for the other
-    /// parents of a merge.
-    Parent { number: usize },
+    Commit {
+        find_matched: bool,
+    },
+    Parent,
+    /// A merge's further parent, by Git's parent number (`2` on).
+    OtherParent(usize),
 }
 
 impl ShaChip {
     fn id(self) -> SharedString {
         match self {
             Self::Commit { .. } => "commit_card_sha".into(),
-            Self::Parent { number: 1 } => "commit_card_parent".into(),
-            Self::Parent { number } => format!("commit_card_parent_{number}").into(),
+            Self::Parent => "commit_card_parent".into(),
+            Self::OtherParent(number) => format!("commit_card_parent_{number}").into(),
         }
     }
 
     fn menu_id(self) -> SharedString {
         match self {
             Self::Commit { .. } => "commit_card_sha_menu".into(),
-            Self::Parent { number: 1 } => "commit_card_parent_menu".into(),
-            Self::Parent { number } => format!("commit_card_parent_menu_{number}").into(),
+            Self::Parent => "commit_card_parent_menu".into(),
+            Self::OtherParent(number) => format!("commit_card_parent_menu_{number}").into(),
         }
     }
 
     fn tooltip(self) -> &'static str {
         match self {
             Self::Commit { .. } => "Copy commit SHA",
-            Self::Parent { .. } => "Go to parent commit",
+            Self::Parent | Self::OtherParent(_) => "Go to parent commit",
         }
     }
 
     fn icon(self) -> Option<&'static str> {
         match self {
             Self::Commit { .. } => Some("icons/copy.svg"),
-            Self::Parent { .. } => None,
+            Self::Parent | Self::OtherParent(_) => None,
         }
     }
 
@@ -192,7 +193,7 @@ impl DetailsPaneView {
                         }
                         match chip {
                             ShaChip::Commit { .. } => this.copy_commit_sha(commit_id.clone(), cx),
-                            ShaChip::Parent { .. } => {
+                            ShaChip::Parent | ShaChip::OtherParent(_) => {
                                 this.reveal_commit_in_history(repo_id, commit_id.clone(), cx)
                             }
                         }
@@ -470,7 +471,11 @@ impl DetailsPaneView {
     ) -> Stateful<Div> {
         let theme = self.theme;
         let ui_scale = self.ui_scale();
-        let parents = &details.parent_ids;
+        let parent = details.parent_ids.first().cloned();
+        let parent_label = match details.parent_ids.len() {
+            0 | 1 => "Parent",
+            _ => "Parents",
+        };
         let date = self.commit_details_date_display(details);
         let relative = (details.authored_at_unix != 0).then(|| {
             crate::view::date_time::format_relative_time(
@@ -571,29 +576,32 @@ impl DetailsPaneView {
                 div()
                     .text_size(theme.ui_text(12.0))
                     .text_color(theme.colors.foreground.secondary)
-                    .child(if parents.len() > 1 {
-                        "Parents"
-                    } else {
-                        "Parent"
-                    }),
+                    .child(parent_label),
             );
-        // Every parent of a merge, in git's order, each revealing its commit.
-        for (ix, parent) in parents.iter().enumerate() {
+        bottom = match parent {
+            Some(parent) => bottom.child(self.commit_card_sha_chip(
+                ShaChip::Parent,
+                repo_id,
+                parent,
+                current,
+                cx,
+            )),
+            None => bottom.child(
+                div()
+                    .text_size(theme.ui_text(12.0))
+                    .text_color(theme.colors.foreground.secondary)
+                    .child("none (root commit)"),
+            ),
+        };
+        // A merge's further parents, in Git's order, each revealing its commit.
+        for (ix, parent) in details.parent_ids.iter().enumerate().skip(1) {
             bottom = bottom.child(self.commit_card_sha_chip(
-                ShaChip::Parent { number: ix + 1 },
+                ShaChip::OtherParent(ix + 1),
                 repo_id,
                 parent.clone(),
                 current,
                 cx,
             ));
-        }
-        if parents.is_empty() {
-            bottom = bottom.child(
-                div()
-                    .text_size(theme.ui_text(12.0))
-                    .text_color(theme.colors.foreground.secondary)
-                    .child("none (root commit)"),
-            );
         }
         if !pills.is_empty() {
             bottom = bottom.child(div().w(px(1.0)).h(px(14.0)).bg(theme.colors.stroke.default));

@@ -336,39 +336,11 @@ pub struct CommitMultiSelection {
     pub anchor: Option<CommitId>,
     pub anchor_index: Option<usize>,
     pub anchor_log_rev: Option<u64>,
-    /// The working tree (History's "Uncommitted changes" row) is paired by a
-    /// Ctrl/Cmd+Shift-click: the one commit in `commits`, if any, is compared
-    /// against it, and further Ctrl/Cmd+Shift-clicks pair other commits with it.
-    pub working_tree: bool,
 }
 
 impl CommitMultiSelection {
-    /// The selection a Ctrl/Cmd+Shift-click builds on while the "Uncommitted
-    /// changes" row is selected: no commit yet, the working tree as the anchor.
-    pub fn working_tree_anchor() -> Self {
-        Self {
-            working_tree: true,
-            ..Self::default()
-        }
-    }
-
     pub fn is_multi(&self) -> bool {
         self.commits.len() > 1
-    }
-
-    /// A Ctrl/Cmd+Shift-click on the "Uncommitted changes" row: the anchor
-    /// commit, or else `selected`, paired with the working tree. The anchor
-    /// stays put. `None` without a commit to pair, when the click selects the
-    /// row like a plain one.
-    pub fn pair_with_working_tree(&self, selected: Option<&CommitId>) -> Option<Self> {
-        let commit = self.anchor.as_ref().or(selected)?.clone();
-        Some(Self {
-            commits: Arc::new(vec![commit.clone()]),
-            anchor: Some(commit),
-            anchor_index: self.anchor_index.filter(|_| self.anchor.is_some()),
-            anchor_log_rev: self.anchor_log_rev.filter(|_| self.anchor.is_some()),
-            working_tree: true,
-        })
     }
 
     pub fn contains(&self, id: &CommitId) -> bool {
@@ -392,7 +364,6 @@ impl CommitMultiSelection {
                 commit_id
             }
             crate::msg::CommitSelectMode::Toggle => {
-                sel.working_tree = false;
                 if let Some(ix) = sel.commits.iter().position(|c| *c == commit_id) {
                     Arc::make_mut(&mut sel.commits).remove(ix);
                     let Some(focus) = sel.commits.last().cloned() else {
@@ -442,7 +413,6 @@ impl CommitMultiSelection {
                         } else {
                             entries[a..=b].to_vec()
                         });
-                        sel.working_tree = false;
                         if sel.anchor.is_none() {
                             sel.anchor = Some(commit_id.clone());
                         }
@@ -450,14 +420,6 @@ impl CommitMultiSelection {
                         sel.anchor_log_rev = Some(log_rev);
                     }
                 }
-                commit_id
-            }
-            crate::msg::CommitSelectMode::Compare => {
-                // Pairs the commit with the working tree while that is paired
-                // or selected; otherwise a plain click.
-                let working_tree = sel.working_tree;
-                collapse_multi_selection_to(&mut sel, commit_id.clone(), clicked_index, log_rev);
-                sel.working_tree = working_tree;
                 commit_id
             }
             crate::msg::CommitSelectMode::PreserveIfSelected => {
@@ -490,7 +452,6 @@ fn collapse_multi_selection_to(
     sel.anchor = Some(commit_id);
     sel.anchor_index = clicked_index;
     sel.anchor_log_rev = Some(log_rev);
-    sel.working_tree = false;
 }
 
 /// Resolves `target`'s index in `entries`, preferring the index hint when it
@@ -539,8 +500,7 @@ pub enum ComparisonSource {
     /// diff is their combined changes.
     MergedSelection,
     /// Exactly two selected commits that are not consecutive: the direct diff
-    /// between them, older (lower in the log) to newer. So is a commit paired
-    /// with the working tree by Ctrl/Cmd+Shift-click (`to` of `None`).
+    /// between them, older (lower in the log) to newer.
     SelectedPair,
     /// Mark/compare, a branch, a tag, or the working tree. Any multi-selection
     /// left over from earlier clicks describes something else and is dropped.
@@ -809,20 +769,6 @@ impl RepoState {
         self.history_state.worktree_selection = path;
         self.history_state.worktree_selection_rev =
             self.history_state.worktree_selection_rev.wrapping_add(1);
-    }
-
-    /// Whether History's "Uncommitted changes" row is the selection: nothing
-    /// else is selected and the working tree has changes for the row to show.
-    /// Nothing selected otherwise falls back to HEAD, so this is what tells a
-    /// Ctrl/Cmd+Shift-click to pair with the working tree.
-    pub fn uncommitted_changes_row_selected(&self) -> bool {
-        let has_changes =
-            |entries: Option<&[FileStatus]>| entries.is_some_and(|entries| !entries.is_empty());
-        self.history_state.selected_commit.is_none()
-            && self.history_state.worktree_selection.is_none()
-            && !self.is_bare()
-            && (has_changes(self.worktree_status_entries())
-                || has_changes(self.staged_status_entries()))
     }
 
     pub(crate) fn set_selected_commit(&mut self, v: Option<CommitId>) {

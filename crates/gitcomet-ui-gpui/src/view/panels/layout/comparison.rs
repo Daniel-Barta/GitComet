@@ -763,8 +763,6 @@ impl DetailsPaneView {
 
 /// The comparison view's header and subheader. Only a merged selection is a
 /// "merged diff"; a selected pair and an explicit compare name their endpoints.
-/// A commit paired with the working tree is one selected commit, titled like
-/// the menu's "Compare with working tree".
 fn comparison_titles(range: &RangeSelection, card_count: usize) -> (SharedString, SharedString) {
     let endpoints = || format!("Viewing diff: {} → {}", range.from_label, range.to_label).into();
     match range.source {
@@ -772,12 +770,10 @@ fn comparison_titles(range: &RangeSelection, card_count: usize) -> (SharedString
             format!("{card_count} commits selected").into(),
             format!("Viewing merged diff of {card_count} commits").into(),
         ),
-        ComparisonSource::SelectedPair if range.to.is_some() => {
+        ComparisonSource::SelectedPair => {
             (format!("{card_count} commits selected").into(), endpoints())
         }
-        ComparisonSource::SelectedPair | ComparisonSource::Explicit => {
-            ("Comparison".into(), endpoints())
-        }
+        ComparisonSource::Explicit => ("Comparison".into(), endpoints()),
     }
 }
 
@@ -809,18 +805,6 @@ mod tests {
         let (title, subheader) = comparison_titles(&range(ComparisonSource::MergedSelection), 3);
         assert_eq!(title.as_ref(), "3 commits selected");
         assert_eq!(subheader.as_ref(), "Viewing merged diff of 3 commits");
-    }
-
-    #[test]
-    fn a_commit_paired_with_the_working_tree_is_a_comparison() {
-        let range = RangeSelection {
-            to: None,
-            to_label: "Working tree".into(),
-            ..range(ComparisonSource::SelectedPair)
-        };
-        let (title, subheader) = comparison_titles(&range, 1);
-        assert_eq!(title.as_ref(), "Comparison");
-        assert_eq!(subheader.as_ref(), "Viewing diff: aaaa → Working tree");
     }
 
     #[test]

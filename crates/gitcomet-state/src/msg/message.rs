@@ -201,10 +201,6 @@ pub enum CommitSelectMode {
     Toggle,
     /// Shift click: select the range between the anchor and the clicked commit.
     Range,
-    /// Ctrl/Cmd+Shift click: compare the clicked commit with the working tree
-    /// while History's "Uncommitted changes" row is selected or paired;
-    /// otherwise a plain click.
-    Compare,
     /// Move focus to the clicked commit while preserving an existing
     /// multi-selection that already contains it (used by right-click so the
     /// details pane follows the menu target); collapses to the clicked commit
@@ -529,14 +525,6 @@ pub enum Msg {
         visible_order: Option<Vec<CommitId>>,
     },
     ClearCommitSelection {
-        request_id: Option<u64>,
-        repo_id: RepoId,
-    },
-    /// Ctrl/Cmd+Shift click on History's "Uncommitted changes" row: compare the
-    /// anchor commit (else the selected one) with the working tree, as
-    /// `CompareWithWorkingTree` does. Without a commit to pair it selects the
-    /// row, as `ClearCommitSelection` does.
-    CompareAnchorWithWorkingTree {
         request_id: Option<u64>,
         repo_id: RepoId,
     },

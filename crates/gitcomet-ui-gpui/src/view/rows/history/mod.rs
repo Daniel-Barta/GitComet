@@ -168,11 +168,12 @@ impl HistoryView {
                     }
 
                     if matches!(row, HistoryListRow::WorkingTreeSummary) {
-                        // Also selected as one end of a Ctrl/Cmd+Shift-click pair.
                         let selected = matches!(
                             &primary_selection,
                             Some(super::HistoryPrimarySelection::WorkingTree)
-                        ) || repo.history_state.multi_selection.working_tree;
+                        );
+                        // Also selected as one end of a working-tree comparison.
+                        let selected = selected || Self::comparing_with_working_tree(repo);
                         return Some(working_tree_summary_history_row(
                             theme,
                             ui_scale,
@@ -663,12 +664,16 @@ fn history_table_row(
             controls::ControlActivation::Composite,
             cx.listener(move |this, e: &ClickEvent, _w, cx| {
                 let modifiers = e.modifiers();
-                let toggle = modifiers.secondary() || modifiers.control || modifiers.platform;
-                let mode = match (modifiers.shift, toggle) {
-                    (true, true) => CommitSelectMode::Compare,
-                    (true, false) => CommitSelectMode::Range,
-                    (false, true) => CommitSelectMode::Toggle,
-                    (false, false) => CommitSelectMode::Single,
+                let clicked = Some((&commit_id, graph_row_ix));
+                if this.compare_with_working_tree_on_click(repo_id, modifiers, clicked, cx) {
+                    return;
+                }
+                let mode = if modifiers.shift {
+                    CommitSelectMode::Range
+                } else if modifiers.secondary() || modifiers.control || modifiers.platform {
+                    CommitSelectMode::Toggle
+                } else {
+                    CommitSelectMode::Single
                 };
                 this.cancel_history_find_navigation();
                 this.select_history_commit(repo_id, commit_id.clone(), mode, Some(graph_row_ix));
@@ -1224,7 +1229,6 @@ fn working_tree_summary_history_row(
     // the flexible summary is the only cell allowed to absorb width pressure.
     let row = div()
         .id(("history_worktree_summary", repo_id.0))
-        .debug_selector(|| "history_working_tree_summary_row".to_string())
         .when(find_dimmed, |row| row.opacity(HISTORY_FIND_DIMMED_OPACITY))
         .h(history_row_height(ui_scale))
         .flex()
@@ -1312,14 +1316,10 @@ fn working_tree_summary_history_row(
             false,
             controls::ControlActivation::Composite,
             cx.listener(move |this, e: &ClickEvent, _w, cx| {
-                // Ctrl/Cmd+Shift pairs the anchor commit with the working tree.
-                let modifiers = e.modifiers();
-                let toggle = modifiers.secondary() || modifiers.control || modifiers.platform;
-                if modifiers.shift && toggle {
-                    this.compare_anchor_with_working_tree(repo_id, cx);
-                } else {
-                    this.select_working_tree_summary_row(repo_id, cx);
+                if this.compare_with_working_tree_on_click(repo_id, e.modifiers(), None, cx) {
+                    return;
                 }
+                this.select_working_tree_summary_row(repo_id, cx);
             }),
         );
 

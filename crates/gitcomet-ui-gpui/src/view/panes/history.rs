@@ -216,7 +216,6 @@ impl PendingHistoryMembers {
                 anchor: anchor.clone(),
                 anchor_index: Some(*anchor_index),
                 anchor_log_rev: Some(*log_rev),
-                working_tree: false,
             },
         }
     }

@@ -1393,8 +1393,12 @@ impl GixRepo {
         self.fetch_remotes_with_output_impl(&remotes, prune)
     }
 
+    pub(super) fn merge_ref_with_output_impl(&self, reference: &str) -> Result<CommandOutput> {
+        self.merge_ref_with_ff_flag_impl(reference, "--ff")
+    }
+
     /// `ff_flag` is `--ff` or `--no-ff`.
-    pub(super) fn merge_ref_with_output_impl(
+    pub(super) fn merge_ref_with_ff_flag_impl(
         &self,
         reference: &str,
         ff_flag: &'static str,

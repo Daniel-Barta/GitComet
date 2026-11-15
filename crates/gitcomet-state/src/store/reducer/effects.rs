@@ -390,21 +390,13 @@ pub(super) fn select_commit_multi(
         return Vec::new();
     };
 
-    // With the "Uncommitted changes" row selected, a Ctrl/Cmd+Shift-click pairs
-    // the commit with the working tree.
-    let working_tree_anchor = (mode == CommitSelectMode::Compare
-        && repo_state.uncommitted_changes_row_selected())
-    .then(CommitMultiSelection::working_tree_anchor);
-    let (sel, focus) = working_tree_anchor
-        .as_ref()
-        .unwrap_or(&repo_state.history_state.multi_selection)
-        .select(
-            commit_id,
-            mode,
-            clicked_index,
-            visible_order,
-            repo_state.history_state.log_rev,
-        );
+    let (sel, focus) = repo_state.history_state.multi_selection.select(
+        commit_id,
+        mode,
+        clicked_index,
+        visible_order,
+        repo_state.history_state.log_rev,
+    );
     let Some(focus) = focus else {
         repo_state.set_selected_commit(None);
         repo_state.set_commit_details(Loadable::NotLoaded);
@@ -413,15 +405,13 @@ pub(super) fn select_commit_multi(
 
     repo_state.set_commit_multi_selection(sel);
 
-    // Two or more commits enter "compare" mode (see `selection_comparison`), as
-    // does a commit paired with the working tree; any other selection falls
-    // back to the single/multi-list behavior below.
+    // Two or more commits enter "compare" mode (see `selection_comparison`);
+    // any other selection falls back to the single/multi-list behavior below.
     let comparison = {
         let selected = &repo_state.history_state.multi_selection.commits;
         (selected.len() >= 2)
             .then(|| selection_comparison(repo_state, None, selected))
             .flatten()
-            .or_else(|| working_tree_comparison(&repo_state.history_state.multi_selection))
     };
 
     let mut effects = match comparison {
@@ -468,12 +458,14 @@ fn enter_selection_comparison(
     repo_id: RepoId,
     SelectionComparison { from, to, source }: SelectionComparison,
 ) -> Vec<Effect> {
-    let to_label = to
-        .as_ref()
-        .map_or_else(|| WORKING_TREE_LABEL.to_string(), range_endpoint_label);
     let next = RangeSelection {
         source,
-        ..RangeSelection::new(from.clone(), to, range_endpoint_label(&from), to_label)
+        ..RangeSelection::new(
+            from.clone(),
+            Some(to.clone()),
+            range_endpoint_label(&from),
+            range_endpoint_label(&to),
+        )
     };
     let open = state
         .repos
@@ -524,8 +516,6 @@ pub(super) fn prune_multi_selection(
     let dropped = selection.commits.iter().any(|id| !survives(id));
     if dropped {
         Arc::make_mut(&mut selection.commits).retain(|id| survives(id));
-        // A working-tree pair loses its commit: the pair ends.
-        selection.working_tree = false;
     }
     if selection.anchor.as_ref().is_some_and(|id| !survives(id)) {
         selection.anchor = None;
@@ -625,23 +615,8 @@ pub(super) fn reconcile_selected_commit_details(
 
 struct SelectionComparison {
     from: CommitId,
-    /// `None` for the working tree.
-    to: Option<CommitId>,
+    to: CommitId,
     source: ComparisonSource,
-}
-
-/// A commit paired with the working tree by Ctrl/Cmd+Shift-click, compared
-/// exactly as the commit menu's "Compare with working tree" does, so both list
-/// the same files.
-fn working_tree_comparison(selection: &CommitMultiSelection) -> Option<SelectionComparison> {
-    let [commit] = selection.commits.as_slice() else {
-        return None;
-    };
-    selection.working_tree.then(|| SelectionComparison {
-        from: commit.clone(),
-        to: None,
-        source: ComparisonSource::SelectedPair,
-    })
 }
 
 /// A first-parent chain gets its merged diff: the oldest's parent (or the empty
@@ -659,13 +634,13 @@ fn selection_comparison(
             from: shape
                 .oldest_parent
                 .or_else(|| empty_tree_id_like(&shape.oldest))?,
-            to: Some(shape.newest),
+            to: shape.newest,
             source: ComparisonSource::MergedSelection,
         });
     }
     (shape.count == 2).then_some(SelectionComparison {
         from: shape.oldest,
-        to: Some(shape.newest),
+        to: shape.newest,
         source: ComparisonSource::SelectedPair,
     })
 }
@@ -755,9 +730,6 @@ fn selection_shape(
     })
 }
 
-/// The working tree's name as a comparison endpoint.
-pub(super) const WORKING_TREE_LABEL: &str = "Working tree";
-
 /// Label for a comparison endpoint in the UI/menus: an abbreviated commit id,
 /// or a name for the empty-tree base, whose sha would be meaningless on screen.
 fn range_endpoint_label(id: &CommitId) -> String {
@@ -766,34 +738,6 @@ fn range_endpoint_label(id: &CommitId) -> String {
         return "start of history".to_string();
     }
     full.get(..8).unwrap_or(full).to_string()
-}
-
-/// Ctrl/Cmd+Shift-click on the "Uncommitted changes" row: compare the anchor
-/// commit, else the selected one, with the working tree. Without a commit to
-/// pair, the click selects the row like a plain one.
-pub(super) fn compare_anchor_with_working_tree(
-    state: &mut AppState,
-    repo_id: RepoId,
-) -> Vec<Effect> {
-    let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
-        return Vec::new();
-    };
-    let history = &repo_state.history_state;
-    let Some(sel) = history
-        .multi_selection
-        .pair_with_working_tree(history.selected_commit.as_ref())
-    else {
-        return clear_commit_selection(state, repo_id);
-    };
-    let comparison = working_tree_comparison(&sel);
-    let commit = sel.commits[0].clone();
-    repo_state.set_commit_multi_selection(sel);
-    // Selected but not loaded: the comparison takes over the details pane, as
-    // it does for a multi-selection.
-    repo_state.set_selected_commit(Some(commit));
-    comparison.map_or_else(Vec::new, |comparison| {
-        enter_selection_comparison(state, repo_id, comparison)
-    })
 }
 
 /// Enter "compare two points" mode: record the ordered `from`/`to` pair and load

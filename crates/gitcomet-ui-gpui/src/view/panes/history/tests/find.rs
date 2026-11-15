@@ -2969,8 +2969,16 @@ fn find_fixture_repo_with_uncommitted_changes() -> RepoState {
     repo
 }
 
-fn ctrl_shift_click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
-    let at = cx.debug_bounds(selector).unwrap().center();
+/// Ctrl+Shift-clicks a commit row, or with `None` the "Uncommitted changes"
+/// row, which sits right above the first commit's.
+fn ctrl_shift_click(cx: &mut gpui::VisualTestContext, commit_row: Option<&'static str>) {
+    let at = match commit_row {
+        Some(selector) => cx.debug_bounds(selector).unwrap().center(),
+        None => {
+            let first_commit = cx.debug_bounds("history_row_1").unwrap();
+            first_commit.center() - gpui::point(gpui::px(0.0), first_commit.size.height)
+        }
+    };
     cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
     cx.simulate_click(
         at,
@@ -2982,57 +2990,87 @@ fn ctrl_shift_click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
     );
 }
 
-/// Ctrl+Shift-click on "Uncommitted changes" compares the anchor commit with
+/// Waits for the comparison the commit menu's "Compare with working tree"
+/// opens for `commit`.
+fn wait_for_working_tree_comparison(
+    cx: &mut gpui::VisualTestContext,
+    store: &AppStore,
+    commit: &str,
+) {
+    wait_until(
+        cx,
+        &format!("{commit} compared with the working tree"),
+        |_| {
+            let state = store.snapshot();
+            let history = &state.repos[0].history_state;
+            history.range_selection.as_ref().is_some_and(|range| {
+                range.from.as_ref() == commit
+                    && range.from_label == commit
+                    && range.to.is_none()
+                    && range.to_label == "Working tree"
+                    && range.source == gitcomet_state::model::ComparisonSource::Explicit
+            }) && history.selected_commit.as_ref().map(AsRef::as_ref) == Some(commit)
+        },
+    );
+}
+
+/// Ctrl+Shift-click on "Uncommitted changes" compares the selected commit with
 /// the working tree, as the commit menu's "Compare with working tree" does.
 #[gpui::test]
-fn history_ctrl_shift_click_on_uncommitted_changes_compares_the_anchor_with_the_working_tree(
+fn history_ctrl_shift_click_on_uncommitted_changes_compares_the_selected_commit(
     cx: &mut gpui::TestAppContext,
 ) {
     let tip = CommitId("aaaa0000".into());
     let mut repo = find_fixture_repo_with_uncommitted_changes();
     repo.history_state.selected_commit = Some(tip.clone());
     repo.history_state.multi_selection.commits = Arc::new(vec![tip.clone()]);
-    repo.history_state.multi_selection.anchor = Some(tip.clone());
+    repo.history_state.multi_selection.anchor = Some(tip);
     let (_view, store, cx) = mount_find_fixture(cx, repo);
 
-    ctrl_shift_click(cx, "history_working_tree_summary_row");
-    wait_until(cx, "the working-tree comparison", |_| {
-        store.snapshot().repos[0]
-            .history_state
-            .range_selection
-            .is_some()
-    });
-
-    let state = store.snapshot();
-    let history = &state.repos[0].history_state;
-    assert!(history.multi_selection.working_tree);
-    assert_eq!(history.selected_commit, Some(tip.clone()));
-    let range = history.range_selection.as_ref().unwrap();
-    assert_eq!(range.from, tip);
-    assert_eq!(range.to, None);
-    assert_eq!(range.to_label, "Working tree");
+    ctrl_shift_click(cx, None);
+    wait_for_working_tree_comparison(cx, &store, "aaaa0000");
 }
 
 /// With "Uncommitted changes" selected, Ctrl+Shift-click on a commit compares
-/// that commit with the working tree.
+/// that commit with the working tree; so does another one while it is compared.
 #[gpui::test]
 fn history_ctrl_shift_click_on_a_commit_compares_it_with_selected_uncommitted_changes(
     cx: &mut gpui::TestAppContext,
 ) {
     let (view, store, cx) = mount_find_fixture(cx, find_fixture_repo_with_uncommitted_changes());
 
-    ctrl_shift_click(cx, "history_row_3");
-    wait_for_selection(cx, &view, &store, "cccc2222");
+    for (row, commit) in [("history_row_3", "cccc2222"), ("history_row_5", "eeee4444")] {
+        ctrl_shift_click(cx, Some(row));
+        wait_for_selection(cx, &view, &store, commit);
+        wait_for_working_tree_comparison(cx, &store, commit);
+    }
+}
 
+/// With nothing to compare, Ctrl+Shift-click keeps its meaning: the row is
+/// selected, and a commit extends the range as a Shift-click does.
+#[gpui::test]
+fn history_ctrl_shift_click_without_a_working_tree_pair_keeps_its_meaning(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_view, store, cx) = mount_find_fixture(cx, find_fixture_repo_with_uncommitted_changes());
+    ctrl_shift_click(cx, None);
+    cx.run_until_parked();
     let state = store.snapshot();
-    let history = &state.repos[0].history_state;
-    assert!(history.multi_selection.working_tree);
-    let range = history
-        .range_selection
-        .as_ref()
-        .expect("a pair opens a comparison");
-    assert_eq!(range.from, CommitId("cccc2222".into()));
-    assert_eq!(range.to, None);
+    assert_eq!(state.repos[0].history_state.selected_commit, None);
+    assert_eq!(state.repos[0].history_state.range_selection, None);
+
+    let tip = CommitId("aaaa0000".into());
+    let mut repo = find_fixture_repo(find_fixture_commits());
+    repo.history_state.selected_commit = Some(tip.clone());
+    repo.history_state.multi_selection.commits = Arc::new(vec![tip.clone()]);
+    repo.history_state.multi_selection.anchor = Some(tip);
+    let (_view, store, cx) = mount_find_fixture(cx, repo);
+    ctrl_shift_click(cx, Some("history_row_2"));
+    wait_until(cx, "the range to be selected", |_| {
+        let state = store.snapshot();
+        let history = &state.repos[0].history_state;
+        history.multi_selection.commits.len() == 3 && history.range_selection.is_none()
+    });
 }
 
 #[gpui::test]

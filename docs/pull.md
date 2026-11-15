@@ -1,6 +1,8 @@
 # Pull
 
-Pull integrates the checked-out branch's upstream. **Pull (default)** fetches every branch of the upstream's remote, like `git pull`; the fast-forward, rebase and merge modes fetch only the upstream branch. Fetch All updates every remote and performs optional pruning.
+Pull fetches and integrates one upstream branch; Fetch All updates the configured remote refs and performs optional pruning.
+
+**Pull (default)** is the exception: it passes only the upstream's repository to Git, not the source ref, so Git fetches every ref the remote's fetch refspecs map, like `git pull`, and still merges only `branch.<name>.merge`. What follows about fetching a single ref describes the fast-forward, rebase and merge modes; on a remote with many branches, use one of them to fetch only the upstream branch.
 
 ## Branch selection
 
@@ -12,17 +14,14 @@ upstream first. After **Create new**, push the branch before pulling it. URL and
 Pull is unavailable, its tooltip and palette entry say why.
 
 Pull reads the checked-out branch's current `branch.<name>.remote` and
-`branch.<name>.merge` configuration when it starts. The fast-forward, rebase and
-merge modes pass that repository and full source ref explicitly to Git, so only that
-ref is fetched. **Pull (default)** passes only the repository, so Git fetches every
-ref the remote's fetch refspecs map and still merges only `branch.<name>.merge`.
-Either way the local and upstream branch names may differ.
+`branch.<name>.merge` configuration when it starts. It passes that repository and
+full source ref explicitly to Git, so the local and upstream branch names may differ.
 
 Pull into current uses its selected repository and `refs/heads/<branch>`.
 Neither action performs a preliminary Fetch All or pruning fetch. Both disable
 pruning even when Git's configuration enables it. Deleted upstreams fail without
 retargeting the branch or removing its upstream configuration. Use Fetch All to
-refresh other remotes and prune stale tracking refs.
+refresh other branches and prune stale tracking refs.
 
 Git's tag settings still apply, including `remote.<name>.tagOpt=--no-tags` or
 `--tags`. An explicit tag setting can transfer additional data. Pull does not
@@ -68,5 +67,4 @@ Error details retain the command, inactivity reason, and captured output. Git
 activity retains the last reported phase and output for diagnosis. A stalled
 transport, credential helper, hook, or large-file transfer can still cause a
 timeout even when only one branch is pulled. Pull does not retry with a broader
-fetch. On a remote with many branches, use a fast-forward, rebase or merge mode to
-fetch only the upstream branch.
+fetch.

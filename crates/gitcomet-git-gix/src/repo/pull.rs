@@ -13,6 +13,10 @@ use std::process::Command;
 struct PullTarget {
     repository: String,
     source_ref: gix::refs::FullName,
+    /// Leaves the source ref out of the command, so Git fetches every ref the
+    /// remote's fetch refspecs map, like plain `git pull`, and merges only
+    /// `branch.<name>.merge`.
+    whole_remote: bool,
 }
 
 impl PullTarget {
@@ -37,6 +41,7 @@ impl PullTarget {
         Ok(Self {
             repository,
             source_ref,
+            whole_remote: false,
         })
     }
 }
@@ -145,10 +150,7 @@ impl GixRepo {
         PullTarget::new(repository.to_string(), source_ref.to_string()).map(Some)
     }
 
-    /// With `whole_remote`, the source ref is left out so Git fetches every
-    /// ref the remote's fetch refspecs map, like plain `git pull`, and merges
-    /// only `branch.<name>.merge`. Otherwise just the source ref is fetched.
-    fn pull_command(&self, target: &PullTarget, mode: PullMode, whole_remote: bool) -> Command {
+    fn pull_command(&self, target: &PullTarget, mode: PullMode) -> Command {
         let mut command = self.git_workdir_cmd();
         command.args(NO_COLOR_CONFIG);
         command.args(["-c", "fetch.pruneTags=false"]);
@@ -174,19 +176,14 @@ impl GixRepo {
             }
         }
         command.args(["--no-prune", "--"]).arg(&target.repository);
-        if !whole_remote {
+        if !target.whole_remote {
             command.arg(target.source_ref.as_bstr().to_string());
         }
         command
     }
 
-    fn pull_target(
-        &self,
-        target: &PullTarget,
-        mode: PullMode,
-        whole_remote: bool,
-    ) -> Result<CommandOutput> {
-        let command = self.pull_command(target, mode, whole_remote);
+    fn pull_target(&self, target: &PullTarget, mode: PullMode) -> Result<CommandOutput> {
+        let command = self.pull_command(target, mode);
         let label = pull_command_label(&command);
         if let Some(operation) = gitcomet_core::git_operation::current() {
             operation.emit(
@@ -204,10 +201,11 @@ impl GixRepo {
                 "Pull requires a checked-out branch. Check out a branch before pulling.",
             ))
         })?;
-        if let Some(target) = self.configured_pull_target(&branch)? {
+        if let Some(mut target) = self.configured_pull_target(&branch)? {
             // Pull (default) updates every remote-tracking branch, as `git pull`
             // does; the explicit modes fetch only the upstream (#677).
-            return self.pull_target(&target, mode, mode == PullMode::Default);
+            target.whole_remote = mode == PullMode::Default;
+            return self.pull_target(&target, mode);
         }
 
         let remote = self.preferred_remote_name()?.ok_or_else(|| {
@@ -219,8 +217,7 @@ impl GixRepo {
         let repo = self.reopen_repo()?;
         let tracking_ref = automatic_upstream_tracking_ref(&repo, &target, &branch)?;
 
-        // Without `branch.<name>.merge`, Git needs the source named to merge it.
-        let output = self.pull_target(&target, mode, false)?;
+        let output = self.pull_target(&target, mode)?;
         let mut set_upstream = self.git_workdir_cmd();
         set_upstream
             .args(["branch", "--set-upstream-to"])
@@ -239,7 +236,7 @@ impl GixRepo {
     ) -> Result<CommandOutput> {
         validate_ref_like_arg(branch, "branch name")?;
         let target = PullTarget::new(remote.to_string(), format!("refs/heads/{branch}"))?;
-        self.pull_target(&target, PullMode::Merge, false)
+        self.pull_target(&target, PullMode::Merge)
     }
 }
 

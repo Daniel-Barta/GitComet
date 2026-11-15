@@ -59,15 +59,18 @@ pub(super) fn panel(
         this.close_popover(cx);
     };
 
-    let note = match fast_forward {
-        MergeFastForward::Allow => {
-            "Git resolves the merge with a merge commit when history diverges."
-        }
-        MergeFastForward::Never => "Git creates a merge commit even when it could fast-forward.",
-    };
     let mut dialog = ConfirmDialog::new("Merge commit?", DIALOG_380_WIDTH)
         .text(theme, format!("Merge {short} into {destination}?"))
-        .note(theme, note);
+        .note(
+            theme,
+            "Git resolves the merge with a merge commit when history diverges.",
+        );
+    if fast_forward == MergeFastForward::Never {
+        dialog = dialog.note(
+            theme,
+            "Without fast-forward, it creates one even when history has not diverged.",
+        );
+    }
     if !summary.is_empty() {
         dialog = dialog.note(theme, summary);
     }

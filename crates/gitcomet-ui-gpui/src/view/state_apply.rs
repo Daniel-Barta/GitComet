@@ -566,12 +566,13 @@ impl GitCometView {
 
         // Only "When a hook runs" opens the output as hooks start; the other
         // modes leave the progress notice to offer it.
-        let open_as_hooks_start =
-            self.ui_model.read(cx).preferences.hooks.output_window == HookOutputWindow::Always;
-        if open_as_hooks_start
-            && !newly_started_hook_chains.is_empty()
-            && !self.hook_activity_workflow_is_open(cx)
+        let newly_started_hook_chains = match self.ui_model.read(cx).preferences.hooks.output_window
         {
+            HookOutputWindow::Always => newly_started_hook_chains,
+            HookOutputWindow::OnFailure | HookOutputWindow::Never => Vec::new(),
+        };
+
+        if !newly_started_hook_chains.is_empty() && !self.hook_activity_workflow_is_open(cx) {
             let another_overlay_is_open = self.is_overlay_open(cx) || self.command_palette_open;
             if another_overlay_is_open {
                 self.minimized_hook_activity_chains.extend(
